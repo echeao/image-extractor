@@ -346,8 +346,15 @@ async function init() {
 // 列数与筛选控制
 // ============================================================
 /**
- * 动态更新画廊网格列数 (1-8列)
+ * 动态更新画廊网格列数 (支持 1-8 列)
  * @param {number} count 目标列数
+ * @returns {void}
+ * 
+ * 详细逻辑：
+ * 1. 限制目标列数在 [1, 8] 范围内；
+ * 2. 更新全局状态 state.columnCount；
+ * 3. 动态调整 CSS 自定义变量 --column-count 及 grid-template-columns 网格平铺规则；
+ * 4. 同步更新滑动条输入框 (columnSlider) 与数字文本显示 (columnValue)。
  */
 function updateColumnCount(count) {
     const newCount = Math.max(1, Math.min(8, count));
@@ -355,7 +362,6 @@ function updateColumnCount(count) {
     if (elements.masonry) {
         elements.masonry.style.setProperty('--column-count', newCount);
         elements.masonry.style.gridTemplateColumns = `repeat(${newCount}, 1fr)`;
-        elements.masonry.style.columnCount = newCount;
     }
     if (elements.columnSlider) elements.columnSlider.value = newCount;
     if (elements.columnValue) elements.columnValue.textContent = newCount;
@@ -680,10 +686,11 @@ function createImageCard(image, index) {
     formatBadge.className = `format-badge ${format.toLowerCase()}`;
     formatBadge.textContent = format;
 
-    // 智能 Bento 跨列 (Col-Span) 与高画质徽章计算
+    // 计算图片分辨率尺寸与像素量，用于识别高画质徽章 (4K / 2K / FHD)
     const maxDimension = Math.max(image.width || 0, image.height || 0);
     const pixelCount = (image.width || 0) * (image.height || 0);
 
+    // 针对大图保留 is-large 标识类（可在样式中做高亮扩展，CSS 中取消强制 span 2 跨列以确保列数排布准确）
     if ((image.width >= 2400 || pixelCount >= 3800000) && (image.width >= image.height)) {
         card.classList.add('is-large');
     }

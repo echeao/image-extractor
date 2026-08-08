@@ -840,15 +840,13 @@ body.canvas-checkerboard {
     justify-content: space-between;
 }
 
-/* Bento 智能跨列：高清/大图自动跨 2 列 */
+/* 
+ * 方案 A：取消高清大图强制跨 2 列 (span 2)
+ * 原因：跨列会导致设置 5 列时一行仅容纳 2~3 张卡片，造成“选择5列实际显示3列”的视觉错觉。
+ * 调整为所有卡片均占用 1 列 (span 1)，保证排布列数与用户设定的列数完全一致。
+ */
 .image-card.is-large {
-    grid-column: span 2;
-}
-
-@media (max-width: 640px) {
-    .image-card.is-large {
-        grid-column: span 1;
-    }
+    grid-column: span 1;
 }
 
 .image-card:hover {
