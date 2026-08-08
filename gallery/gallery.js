@@ -29,7 +29,7 @@ const state = {
     lastSelectedIndex: null, // 上一次手动的选中索引（用于 Shift 键连续范围选择）
 
     // ---------- 筛选设置 ----------
-    minResolution: 500,      // 快速筛选：最小分辨率（像素）
+    minResolution: 1000,     // 快速筛选：默认最小分辨率 1000px（优先精选高清大图）
     customMinWidth: 0,       // 自定义筛选：最小宽度
     customMinHeight: 0,      // 自定义筛选：最小高度
     selectedFormat: 'all',   // 图片格式筛选: 'all' | 'PNG' | 'JPG' | 'WEBP' | 'SVG' | 'GIF'
@@ -89,7 +89,7 @@ async function loadSettings() {
         const result = await chrome.storage.local.get(STORAGE_KEY);
         const settings = result[STORAGE_KEY];
         if (settings) {
-            state.minResolution = settings.minResolution ?? 500;
+            state.minResolution = settings.minResolution ?? 1000;
             state.customMinWidth = settings.customMinWidth ?? 0;
             state.customMinHeight = settings.customMinHeight ?? 0;
             state.selectedFormat = settings.selectedFormat ?? 'all';
@@ -345,10 +345,18 @@ async function init() {
 // ============================================================
 // 列数与筛选控制
 // ============================================================
+/**
+ * 动态更新画廊网格列数 (1-8列)
+ * @param {number} count 目标列数
+ */
 function updateColumnCount(count) {
     const newCount = Math.max(1, Math.min(8, count));
     state.columnCount = newCount;
-    if (elements.masonry) elements.masonry.style.columnCount = newCount;
+    if (elements.masonry) {
+        elements.masonry.style.setProperty('--column-count', newCount);
+        elements.masonry.style.gridTemplateColumns = `repeat(${newCount}, 1fr)`;
+        elements.masonry.style.columnCount = newCount;
+    }
     if (elements.columnSlider) elements.columnSlider.value = newCount;
     if (elements.columnValue) elements.columnValue.textContent = newCount;
 }
@@ -411,10 +419,10 @@ function setRatioFilter(ratio, activeBtn) {
 }
 
 /**
- * 一键重置所有筛选过滤条件为默认状态
+ * 一键重置所有筛选过滤条件为默认状态 (默认 1000px 分辨率)
  */
 function resetAllFilters() {
-    state.minResolution = 500;
+    state.minResolution = 1000;
     state.customMinWidth = 0;
     state.customMinHeight = 0;
     state.selectedFormat = 'all';
@@ -666,11 +674,30 @@ function createImageCard(image, index) {
     img.alt = `Image ${index + 1}`;
     img.loading = 'lazy';
 
-    // 格式 Badge
+    // 格式 Badge 与 4K/2K/FHD 画质徽章
     const format = getImageFormatFromUrl(image.src);
     const formatBadge = document.createElement('div');
     formatBadge.className = `format-badge ${format.toLowerCase()}`;
     formatBadge.textContent = format;
+
+    // 智能 Bento 跨列 (Col-Span) 与高画质徽章计算
+    const maxDimension = Math.max(image.width || 0, image.height || 0);
+    const pixelCount = (image.width || 0) * (image.height || 0);
+
+    if ((image.width >= 2400 || pixelCount >= 3800000) && (image.width >= image.height)) {
+        card.classList.add('is-large');
+    }
+
+    if (maxDimension >= 3840 || pixelCount >= 8000000) {
+        formatBadge.classList.add('badge-4k');
+        formatBadge.textContent = '4K UHD';
+    } else if (maxDimension >= 2560 || pixelCount >= 3600000) {
+        formatBadge.classList.add('badge-2k');
+        formatBadge.textContent = '2K QHD';
+    } else if (maxDimension >= 1920 || pixelCount >= 2000000) {
+        formatBadge.classList.add('badge-fhd');
+        formatBadge.textContent = 'FHD 1080P';
+    }
 
     // 勾选指示器 Badge (注入 SVG 对勾图标)
     const checkIndicator = document.createElement('div');
@@ -738,6 +765,24 @@ function createImageCard(image, index) {
         }
         resolutionTag.textContent = `${image.width} × ${image.height}`;
         updateResolutionTagClass(resolutionTag, image.width, image.height);
+
+        // 二次检测大图 Bento 跨列与徽章状态
+        const maxD = Math.max(image.width, image.height);
+        const pixels = image.width * image.height;
+        if ((image.width >= 2400 || pixels >= 3800000) && (image.width >= image.height)) {
+            card.classList.add('is-large');
+        }
+
+        if (maxD >= 3840 || pixels >= 8000000) {
+            formatBadge.classList.add('badge-4k');
+            formatBadge.textContent = '4K UHD';
+        } else if (maxD >= 2560 || pixels >= 3600000) {
+            formatBadge.classList.add('badge-2k');
+            formatBadge.textContent = '2K QHD';
+        } else if (maxD >= 1920 || pixels >= 2000000) {
+            formatBadge.classList.add('badge-fhd');
+            formatBadge.textContent = 'FHD 1080P';
+        }
     };
 
     img.onerror = () => {

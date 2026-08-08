@@ -9,7 +9,7 @@ const state = {
   filteredImages: [],      // 过滤后的图片
   selectedImages: new Set(), // 已选中的图片索引（基于 filteredImages）
   isAllSelected: false,    // 是否全选
-  minResolution: 500,      // 默认最小分辨率 500px
+  minResolution: 1000,     // 默认最小分辨率 1000px
   isRenaming: false,       // 是否开启重命名
   renamePrefix: ''         // 重命名前缀
 };
