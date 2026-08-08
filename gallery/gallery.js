@@ -401,12 +401,39 @@ async function init() {
  * 3. 动态调整 CSS 自定义变量 --column-count 及 grid-template-columns 网格平铺规则；
  * 4. 同步更新滑动条输入框 (columnSlider) 与数字文本显示 (columnValue)。
  */
+/**
+ * 动态更新画廊网格列数 (区分宽屏与竖屏响应式列数)
+ * @param {number} count 目标竖屏列数 (1-8)
+ * @returns {void}
+ * 
+ * 详细计算与响应逻辑：
+ * 1. 限制竖屏目标列数在 [1, 8] 范围内，并更新全局状态 state.columnCount；
+ * 2. 竖屏列数 portraitCount 严格等于目标列数 count；
+ * 3. 宽屏列数 landscapeCount 的计算逻辑：
+ *    - 当 count === 1 时：设置为 1 列；
+ *    - 当 count 为偶数 (2, 4, 6, 8) 时：宽屏图片按一张占据两列计算，宽屏列数 = count / 2；
+ *    - 当 count 为奇数 (3, 5, 7) 时：宽屏图片宽度直接按 1/2 显示，宽屏列数 = 2；
+ * 4. 将计算后的 --portrait-column-count 与 --landscape-column-count 注入 CSS 自定义变量；
+ * 5. 同步更新滑动条与数值显示元素。
+ */
 function updateColumnCount(count) {
     const newCount = Math.max(1, Math.min(8, count));
     state.columnCount = newCount;
+
+    // 竖屏与宽屏不同的列数逻辑
+    const portraitCount = newCount;
+    let landscapeCount;
+    if (newCount === 1) {
+        landscapeCount = 1;
+    } else if (newCount % 2 === 0) {
+        landscapeCount = newCount / 2; // 偶数列数：宽屏占 2 列，宽屏总列数 = N / 2
+    } else {
+        landscapeCount = 2; // 奇数列数：宽屏按宽度直接除以 2 显示
+    }
+
     if (elements.masonry) {
-        elements.masonry.style.setProperty('--column-count', newCount);
-        elements.masonry.style.gridTemplateColumns = `repeat(${newCount}, 1fr)`;
+        elements.masonry.style.setProperty('--portrait-column-count', portraitCount);
+        elements.masonry.style.setProperty('--landscape-column-count', landscapeCount);
     }
     if (elements.columnSlider) elements.columnSlider.value = newCount;
     if (elements.columnValue) elements.columnValue.textContent = newCount;
@@ -530,6 +557,9 @@ function applyFilter() {
         return true;
     });
 
+    // 4. 瀑布流图片横竖屏分组优化编排（宽屏图片集中在最前，竖屏图片集中在后）
+    state.filteredImages = sortImagesByAspectRatio(state.filteredImages);
+
     updateFilterStats();
 
     if (state.filteredImages.length === 0) {
@@ -537,6 +567,54 @@ function applyFilter() {
     } else {
         renderImages();
     }
+}
+
+/**
+ * 瀑布流图片宽高比分组排序函数
+ * 
+ * 职责说明：
+ * 将筛选后的图片集合重新编排顺序，实现宽屏（横图/方图）与竖屏（长图）的分离显示。
+ * 确保宽屏图片集中显示在最前方，竖屏图片集中置于后方，极大改善瀑布流布局的列高起伏与平整度。
+ * 
+ * @param {Array<Object>} images 待排序的图片元数据对象数组
+ * @param {string} images[].src 图片 URL 资源地址
+ * @param {number} images[].width 图片自然宽度 (px)
+ * @param {number} images[].height 图片自然高度 (px)
+ * @returns {Array<Object>} 完成宽屏与竖屏切分排序后的图片数组
+ */
+function sortImagesByAspectRatio(images) {
+    if (!Array.isArray(images) || images.length <= 1) {
+        return images;
+    }
+
+    return images.sort((a, b) => {
+        /**
+         * 计算单张图片的横竖屏分组权值
+         * @param {Object} img 图片元数据
+         * @returns {number} 0 代表宽屏/方图（优先排列），1 代表竖屏（排在后方）
+         */
+        const getGroupWeight = (img) => {
+            const width = img.width || 0;
+            const height = img.height || 0;
+            if (width > 0 && height > 0) {
+                // 宽屏/方图 (width >= height) 权值为 0；竖屏 (width < height) 权值为 1
+                return (width / height >= 1.0) ? 0 : 1;
+            }
+            // 若宽度或高度信息缺失，默认归为宽屏组（权值 0），避免破坏视觉排布
+            return 0;
+        };
+
+        const weightA = getGroupWeight(a);
+        const weightB = getGroupWeight(b);
+
+        // 不同分组间：宽屏组 (0) 排在 竖屏组 (1) 之前
+        if (weightA !== weightB) {
+            return weightA - weightB;
+        }
+
+        // 同分组内：返回 0 以利用 ES 稳定排序 (Stable Sort) 保留图片在原页面中的提取顺序
+        return 0;
+    });
 }
 
 function updateFilterStats() {
@@ -706,6 +784,18 @@ function extractImagesFromPage() {
 // ============================================================
 // 渲染瀑布流卡片 (支持悬浮快捷工具栏与勾选指示器)
 // ============================================================
+/**
+ * 渲染瀑布流卡片 (包含宽屏图片区与竖屏图片区的分区块响应式渲染)
+ * 
+ * 详细渲染逻辑说明：
+ * 1. 隐藏加载器与空状态提示；
+ * 2. 清空主瀑布流容器 #masonry；
+ * 3. 动态触发 updateColumnCount 以刷新宽屏与竖屏各自的列数 CSS 变量；
+ * 4. 遍历当前筛选后的图片集合 state.filteredImages，依据自然宽高比 (width / height)
+ *    将图片精准归类划分为宽屏数组 (landscapeImages) 与竖屏数组 (portraitImages)；
+ * 5. 若存在宽屏图片，创建 .masonry-section.landscape-section 子区块，并填充对应的卡片元素；
+ * 6. 若存在竖屏图片，创建 .masonry-section.portrait-section 子区块，并填充对应的卡片元素。
+ */
 function renderImages() {
     hideLoader();
     if (elements.emptyState) elements.emptyState.classList.add('hidden');
@@ -716,10 +806,44 @@ function renderImages() {
 
     updateStats();
 
+    // 刷新宽屏与竖屏响应式列数 CSS 自定义变量
+    updateColumnCount(state.columnCount);
+
+    // 区分宽屏 (ratio >= 1.0) 与竖屏 (ratio < 1.0)
+    const landscapeImages = [];
+    const portraitImages = [];
+
     state.filteredImages.forEach((image, index) => {
-        const card = createImageCard(image, index);
-        if (elements.masonry) elements.masonry.appendChild(card);
+        const width = image.width || 0;
+        const height = image.height || 0;
+        if (width > 0 && height > 0 && width / height < 1.0) {
+            portraitImages.push({ image, index });
+        } else {
+            landscapeImages.push({ image, index });
+        }
     });
+
+    // 渲染宽屏图片区块
+    if (landscapeImages.length > 0) {
+        const landscapeSection = document.createElement('div');
+        landscapeSection.className = 'masonry-section landscape-section';
+        landscapeImages.forEach(({ image, index }) => {
+            const card = createImageCard(image, index);
+            landscapeSection.appendChild(card);
+        });
+        if (elements.masonry) elements.masonry.appendChild(landscapeSection);
+    }
+
+    // 渲染竖屏图片区块
+    if (portraitImages.length > 0) {
+        const portraitSection = document.createElement('div');
+        portraitSection.className = 'masonry-section portrait-section';
+        portraitImages.forEach(({ image, index }) => {
+            const card = createImageCard(image, index);
+            portraitSection.appendChild(card);
+        });
+        if (elements.masonry) elements.masonry.appendChild(portraitSection);
+    }
 }
 
 /**

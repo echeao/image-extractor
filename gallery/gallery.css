@@ -814,15 +814,31 @@ body.canvas-checkerboard {
 
 /* ========== 5. 瀑布流/响应式网格容器与卡片样式 ========== */
 .masonry {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.masonry.hidden {
+    display: none;
+}
+
+/* 宽屏与竖屏分区块响应式网格 */
+.masonry-section {
     display: grid;
-    grid-template-columns: repeat(var(--column-count, 5), 1fr);
     gap: 16px;
     align-items: start;
     transition: grid-template-columns 0.3s ease;
 }
 
-.masonry.hidden {
-    display: none;
+/* 宽屏图片区块：使用计算出的 --landscape-column-count (偶数 N/2, 奇数 2 列) */
+.masonry-section.landscape-section {
+    grid-template-columns: repeat(var(--landscape-column-count, 2), 1fr);
+}
+
+/* 竖屏图片区块：按用户设置的 --portrait-column-count 列数严格排列 */
+.masonry-section.portrait-section {
+    grid-template-columns: repeat(var(--portrait-column-count, 5), 1fr);
 }
 
 .image-card {
