@@ -9,7 +9,7 @@
  * 
  * 主要职责：
  * 1. 监听扩展图标点击事件，打开画廊页面
- * 2. 监听来自画廊页面的消息，处理图片下载请求
+ * 2. 监听来自画廊页面的消息，处理图片下载请求与落盘下载完成后自动关页
  * 
  * Service Worker 生命周期说明：
  * - 不会一直运行，Chrome 会在空闲时终止它
@@ -40,6 +40,116 @@ chrome.action.onClicked.addListener(() => {
     });
 });
 
+// ============================================================
+// 标签页与下载关联任务追踪器 (chrome.storage.session 持久化)
+// ============================================================
+// MV3 Service Worker 在空闲约 30 秒后会被 Chrome 终止，仅存在内存中的
+// Map 会随之丢失，导致下载落盘完成后 onChanged 触发时找不到关联记录，
+// 自动关页功能失效。因此将追踪状态持久化到 chrome.storage.session：
+// 它仅随浏览器重启而清空，可跨 Service Worker 重启存活。
+const SESSION_STATE_KEY = 'downloadTabTracker';
+
+// 记录处于下载中的 downloadId 及其关联标签页
+let pendingDownloadTabs = new Map(); // downloadId -> { tabId: number, autoClose: boolean }
+// 记录每个 tabId 尚在排队/下载中的图片总任务数
+let tabPendingCounts = new Map();   // tabId -> number
+
+/**
+ * Service Worker 启动时从 chrome.storage.session 恢复追踪状态。
+ * 注意：扩展 SW 按经典脚本解析，不支持顶层 await（会导致注册失败），
+ * 因此这里只发起加载，各事件处理器内部等待该 Promise 完成后再处理。
+ */
+async function loadTrackerState() {
+    try {
+        const result = await chrome.storage.session.get(SESSION_STATE_KEY);
+        const saved = result[SESSION_STATE_KEY];
+        if (saved) {
+            pendingDownloadTabs = new Map(
+                Object.entries(saved.pendingDownloadTabs || {}).map(([id, info]) => [Number(id), info])
+            );
+            tabPendingCounts = new Map(
+                Object.entries(saved.tabPendingCounts || {}).map(([tabId, count]) => [Number(tabId), count])
+            );
+        }
+    } catch (error) {
+        console.log('恢复下载追踪状态失败:', error);
+    }
+}
+
+const trackerStateReady = loadTrackerState();
+
+/**
+ * 将追踪状态写回 chrome.storage.session（异步，失败不影响主流程）
+ */
+function saveTrackerState() {
+    chrome.storage.session.set({
+        [SESSION_STATE_KEY]: {
+            pendingDownloadTabs: Object.fromEntries(pendingDownloadTabs),
+            tabPendingCounts: Object.fromEntries(tabPendingCounts)
+        }
+    }).catch(err => console.log('保存下载追踪状态失败:', err));
+}
+
+function setPendingDownload(downloadId, info) {
+    pendingDownloadTabs.set(downloadId, info);
+    saveTrackerState();
+}
+
+function deletePendingDownload(downloadId) {
+    pendingDownloadTabs.delete(downloadId);
+    saveTrackerState();
+}
+
+function incrementTabCount(tabId) {
+    tabPendingCounts.set(tabId, (tabPendingCounts.get(tabId) || 0) + 1);
+    saveTrackerState();
+}
+
+/**
+ * 递减某个标签页的待下载任务数，返回剩余数量
+ */
+function decrementTabCount(tabId) {
+    const remaining = (tabPendingCounts.get(tabId) || 1) - 1;
+    if (remaining <= 0) {
+        tabPendingCounts.delete(tabId);
+    } else {
+        tabPendingCounts.set(tabId, remaining);
+    }
+    saveTrackerState();
+    return remaining;
+}
+
+/**
+ * 监听 Chrome 下载任务状态改变，当关联标签页的所有图片在磁盘保存完毕 (complete) 后平滑关页
+ */
+chrome.downloads.onChanged.addListener((delta) => {
+    if (!delta.state) return;
+
+    // 等待追踪状态恢复完成后再处理，避免状态尚未加载时误判
+    trackerStateReady.then(() => {
+        const downloadId = delta.id;
+        const info = pendingDownloadTabs.get(downloadId);
+
+        if (info) {
+            const { tabId, autoClose } = info;
+            // 当单个文件下载成功 complete 或中断 interrupted 时
+            if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
+                deletePendingDownload(downloadId);
+
+                if (autoClose && tabId) {
+                    const remaining = decrementTabCount(tabId);
+                    // 仅当此 tabId 的所有下载任务全部完成且该图下载成功时，触发标签页关闭
+                    if (remaining <= 0 && delta.state.current === 'complete') {
+                        chrome.tabs.remove(tabId).catch(err => {
+                            console.log(`后台自动关闭标签页 (ID: ${tabId}) 提示:`, err);
+                        });
+                    }
+                }
+            }
+        }
+    });
+});
+
 /**
  * 监听来自扩展其他部分的消息
  * 
@@ -56,13 +166,33 @@ chrome.action.onClicked.addListener(() => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // 根据 action 字段判断消息类型
     if (request.action === 'download') {
-        // 调用下载函数，处理图片下载
-        downloadImage(request.url, request.filename, request.folder)
-            .then(result => sendResponse({ success: true, ...result }))
-            .catch(error => sendResponse({ success: false, error: error.message }));
+        // 等待追踪状态恢复完成后再处理下载请求
+        trackerStateReady.then(() => {
+            const tabId = request.tabId;
+            const autoClose = Boolean(request.autoClose);
+
+            // 如果开启了自动关页且有合法 tabId，递增计数
+            if (autoClose && tabId) {
+                incrementTabCount(tabId);
+            }
+
+            // 调用下载函数，处理图片下载
+            downloadImage(request.url, request.filename, request.folder)
+                .then(result => {
+                    if (autoClose && tabId && result.downloadId) {
+                        setPendingDownload(result.downloadId, { tabId, autoClose });
+                    }
+                    sendResponse({ success: true, ...result });
+                })
+                .catch(error => {
+                    if (autoClose && tabId) {
+                        decrementTabCount(tabId);
+                    }
+                    sendResponse({ success: false, error: error.message });
+                });
+        });
 
         // 重要：返回 true 表示我们会异步调用 sendResponse
-        // 如果不返回 true，sendResponse 会立即失效
         return true;
     }
 

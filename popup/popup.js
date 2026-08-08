@@ -26,8 +26,61 @@ const elements = {
   selectAllBtn: document.getElementById('selectAllBtn'),
   downloadBtn: document.getElementById('downloadBtn'),
   renameToggle: document.getElementById('renameToggle'),
-  renamePrefix: document.getElementById('renamePrefix')
+  renamePrefix: document.getElementById('renamePrefix'),
+  autoCloseTabsToggle: document.getElementById('autoCloseTabsToggle')
 };
+
+// ========== 设置持久化存储 ==========
+const STORAGE_KEY = 'imageExtractorSettings';
+
+/**
+ * 保存设置到 chrome.storage.local (包含重命名设置及关页选项)
+ */
+async function saveSettings() {
+  try {
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    const currentSettings = result[STORAGE_KEY] || {};
+    const updatedSettings = {
+      ...currentSettings,
+      isRenaming: state.isRenaming,
+      renamePrefix: state.renamePrefix,
+      autoCloseTabs: state.autoCloseTabs
+    };
+    await chrome.storage.local.set({ [STORAGE_KEY]: updatedSettings });
+  } catch (error) {
+    console.error('Popup 保存设置失败:', error);
+  }
+}
+
+/**
+ * 从 chrome.storage.local 加载已保存的配置
+ */
+async function loadSettings() {
+  try {
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    const settings = result[STORAGE_KEY];
+    if (settings) {
+      state.isRenaming = settings.isRenaming ?? false;
+      state.renamePrefix = settings.renamePrefix ?? '';
+      state.autoCloseTabs = settings.autoCloseTabs ?? false;
+      if (settings.downloadFolder) state.downloadFolder = settings.downloadFolder;
+    }
+  } catch (error) {
+    console.error('Popup 加载设置失败:', error);
+  }
+}
+
+/**
+ * 将配置应用到 UI 元素
+ */
+function applySettingsToUI() {
+  if (elements.renameToggle) elements.renameToggle.checked = state.isRenaming;
+  if (elements.autoCloseTabsToggle) elements.autoCloseTabsToggle.checked = state.autoCloseTabs;
+  if (elements.renamePrefix) {
+    elements.renamePrefix.value = state.renamePrefix;
+    elements.renamePrefix.disabled = !state.isRenaming;
+  }
+}
 
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', init);
@@ -51,15 +104,26 @@ async function init() {
     });
   });
 
-  // 批量重命名控制
+  // 批量重命名与自动关页控制
   if (elements.renameToggle) elements.renameToggle.addEventListener('change', toggleRename);
+  if (elements.autoCloseTabsToggle) {
+    elements.autoCloseTabsToggle.addEventListener('change', (e) => {
+      state.autoCloseTabs = e.target.checked;
+      saveSettings();
+    });
+  }
   if (elements.renamePrefix) {
     elements.renamePrefix.addEventListener('input', (e) => {
       const sanitized = sanitizeFilenamePart(e.target.value);
       e.target.value = sanitized;
       state.renamePrefix = sanitized;
+      saveSettings(); // 即时保存前缀设置
     });
   }
+
+  // 加载已保存设置并渲染到 UI
+  await loadSettings();
+  applySettingsToUI();
 
   // 开始提取图片
   await extractImages();
@@ -119,13 +183,16 @@ async function extractImages() {
 
   try {
     const tabs = await chrome.tabs.query({});
-    const validTabs = tabs.filter(tab =>
-      tab.url &&
-      !tab.url.startsWith('chrome://') &&
-      !tab.url.startsWith('chrome-extension://') &&
-      !tab.url.startsWith('edge://') &&
-      !tab.url.startsWith('about:')
-    );
+    const validTabs = tabs.filter(tab => {
+      const pageUrl = tab.url || tab.pendingUrl || '';
+      if (pageUrl) {
+        return !pageUrl.startsWith('chrome://') &&
+               !pageUrl.startsWith('chrome-extension://') &&
+               !pageUrl.startsWith('edge://') &&
+               !pageUrl.startsWith('about:');
+      }
+      return true; // 即使 MV3 中非激活标签页 url 字段为 undefined，依然保留其 ID 进行提取与后续关页
+    });
 
     if (validTabs.length === 0) {
       showEmptyState();
@@ -154,13 +221,25 @@ async function extractImages() {
 
     const allImages = await Promise.all(imagePromises);
     const flatImages = allImages.flat();
-    const seenUrls = new Set();
+    const urlMap = new Map();
 
-    state.images = flatImages.filter(img => {
-      if (seenUrls.has(img.src)) return false;
-      seenUrls.add(img.src);
-      return true;
+    flatImages.forEach(img => {
+      if (!urlMap.has(img.src)) {
+        const initialTabIds = new Set();
+        if (img.tabId) initialTabIds.add(img.tabId);
+        urlMap.set(img.src, {
+          ...img,
+          tabIds: initialTabIds
+        });
+      } else {
+        const existing = urlMap.get(img.src);
+        if (img.tabId && existing.tabIds) {
+          existing.tabIds.add(img.tabId);
+        }
+      }
     });
+
+    state.images = Array.from(urlMap.values());
 
     if (state.images.length === 0) {
       showEmptyState();
@@ -388,10 +467,12 @@ async function downloadSelected() {
   const selectedIndices = Array.from(state.selectedImages);
   const total = selectedIndices.length;
   const padding = total.toString().length;
+  const folder = state.downloadFolder || 'images';
 
   for (let i = 0; i < total; i++) {
     const index = selectedIndices[i];
-    const url = state.filteredImages[index].src;
+    const image = state.filteredImages[index];
+    const url = image.src;
     let filename = null;
 
     if (state.isRenaming && state.renamePrefix) {
@@ -415,16 +496,23 @@ async function downloadSelected() {
       const response = await chrome.runtime.sendMessage({
         action: 'download',
         url: url,
-        filename: filename
+        filename: filename,
+        folder: folder,
+        tabId: image.tabId,
+        autoClose: state.autoCloseTabs
       });
 
-      if (!response?.success) {
+      if (response?.success) {
+        // 自动关页由后台 Service Worker 在下载落盘完成后统一执行，前端不做提前关页
+      } else {
         throw new Error(response?.error || '下载失败');
       }
     } catch (error) {
       console.error('下载失败:', url, error);
     }
   }
+
+  // 自动关页由后台 Service Worker 在下载落盘完成后统一执行（关页时机更准确、跨 SW 重启可靠）
 
   state.selectedImages.clear();
   document.querySelectorAll('.image-card.selected').forEach(card => {
@@ -439,6 +527,7 @@ function toggleRename(e) {
   state.isRenaming = e.target.checked;
   if (elements.renamePrefix) elements.renamePrefix.disabled = !state.isRenaming;
   if (state.isRenaming && elements.renamePrefix) elements.renamePrefix.focus();
+  saveSettings(); // 即时保存重命名开关
 }
 
 function sanitizeFilenamePart(value) {

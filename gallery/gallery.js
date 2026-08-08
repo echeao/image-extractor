@@ -71,7 +71,9 @@ async function saveSettings() {
         theme: state.theme,
         isPanelOpen: state.isPanelOpen,
         canvasBg: state.canvasBg,
-        autoCloseTabs: state.autoCloseTabs
+        autoCloseTabs: state.autoCloseTabs,
+        isRenaming: state.isRenaming,        // 保存重命名开关状态
+        renamePrefix: state.renamePrefix     // 保存重命名前缀文本
     };
     try {
         await chrome.storage.local.set({ [STORAGE_KEY]: settings });
@@ -100,6 +102,8 @@ async function loadSettings() {
             state.isPanelOpen = settings.isPanelOpen ?? false;
             state.canvasBg = settings.canvasBg ?? 'default';
             state.autoCloseTabs = settings.autoCloseTabs ?? false;
+            state.isRenaming = settings.isRenaming ?? false;      // 恢复重命名开关状态
+            state.renamePrefix = settings.renamePrefix ?? '';    // 恢复重命名前缀文本
             console.log('设置已加载恢复:', settings);
         } else {
             state.theme = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
@@ -121,9 +125,16 @@ function applySettingsToUI() {
     applyFilterPanelState(state.isPanelOpen);
     applyCanvasBg(state.canvasBg);
 
-    // 3. 下载配置
+    // 3. 下载配置与自动关页选项恢复
     if (elements.downloadFolder) elements.downloadFolder.value = state.downloadFolder;
     if (elements.autoCloseTabsToggle) elements.autoCloseTabsToggle.checked = state.autoCloseTabs;
+
+    // 4. 重命名开关与前缀输入框UI恢复
+    if (elements.renameToggle) elements.renameToggle.checked = state.isRenaming;
+    if (elements.renamePrefix) {
+        elements.renamePrefix.value = state.renamePrefix;
+        elements.renamePrefix.disabled = !state.isRenaming;
+    }
 
     // 4. 尺寸与分辨率筛选按钮激活态
     if (state.customMinWidth > 0 || state.customMinHeight > 0) {
@@ -271,6 +282,7 @@ async function init() {
             const sanitized = sanitizeFilenamePart(e.target.value);
             e.target.value = sanitized;
             state.renamePrefix = sanitized;
+            saveSettings(); // 即时持久化保存重命名前缀
         });
     }
     if (elements.downloadFolder) {
@@ -523,13 +535,16 @@ async function extractImages() {
 
     try {
         const tabs = await chrome.tabs.query({});
-        const validTabs = tabs.filter(tab =>
-            tab.url &&
-            !tab.url.startsWith('chrome://') &&
-            !tab.url.startsWith('chrome-extension://') &&
-            !tab.url.startsWith('edge://') &&
-            !tab.url.startsWith('about:')
-        );
+        const validTabs = tabs.filter(tab => {
+            const pageUrl = tab.url || tab.pendingUrl || '';
+            if (pageUrl) {
+                return !pageUrl.startsWith('chrome://') &&
+                       !pageUrl.startsWith('chrome-extension://') &&
+                       !pageUrl.startsWith('edge://') &&
+                       !pageUrl.startsWith('about:');
+            }
+            return true; // 即使 MV3 中非激活标签页 url 字段为 undefined，依然保留其 ID 进行提取与后续关页
+        });
 
         if (validTabs.length === 0) {
             showEmptyState();
@@ -566,12 +581,26 @@ async function extractImages() {
         ]);
 
         const flatImages = allImagesResult.flat();
-        const seenUrls = new Set();
-        state.images = flatImages.filter(img => {
-            if (seenUrls.has(img.src)) return false;
-            seenUrls.add(img.src);
-            return true;
+        const urlMap = new Map();
+
+        flatImages.forEach(img => {
+            if (!urlMap.has(img.src)) {
+                const initialTabIds = typeof img.tabId === 'number' ? [img.tabId] : [];
+                urlMap.set(img.src, {
+                    ...img,
+                    tabIds: initialTabIds
+                });
+            } else {
+                const existing = urlMap.get(img.src);
+                if (typeof img.tabId === 'number' && Array.isArray(existing.tabIds)) {
+                    if (!existing.tabIds.includes(img.tabId)) {
+                        existing.tabIds.push(img.tabId);
+                    }
+                }
+            }
         });
+
+        state.images = Array.from(urlMap.values());
 
         if (state.images.length === 0) {
             showEmptyState();
@@ -970,6 +999,28 @@ function toggleClickAction(e) {
 function toggleRename(e) {
     state.isRenaming = e.target.checked;
     if (elements.renamePrefix) elements.renamePrefix.disabled = !state.isRenaming;
+    saveSettings(); // 即时保存重命名开关设置
+}
+
+/**
+ * 从图片元数据对象中强类型安全地提取所有合法的标签页 ID (number[])
+ * @param {Object} img 图片元数据
+ * @returns {number[]} 清洗后的标签页 ID 数组
+ */
+function extractTabIdsFromImg(img) {
+    const ids = [];
+    if (!img) return ids;
+    if (Array.isArray(img.tabIds)) {
+        img.tabIds.forEach(id => {
+            const num = Number(id);
+            if (Number.isInteger(num) && !ids.includes(num)) ids.push(num);
+        });
+    }
+    if (img.tabId) {
+        const num = Number(img.tabId);
+        if (Number.isInteger(num) && !ids.includes(num)) ids.push(num);
+    }
+    return ids;
 }
 
 /**
@@ -983,16 +1034,30 @@ async function downloadSingleImage(image) {
         const response = await chrome.runtime.sendMessage({
             action: 'download',
             url: image.src,
-            folder: folder
+            folder: folder,
+            tabId: image.tabId,
+            autoClose: state.autoCloseTabs
         });
         if (response && response.success) {
-            appendDiagnosticsLog(`单图下载成功 ID: ${response.downloadId}`);
+            appendDiagnosticsLog(`单图下载请求提交成功 ID: ${response.downloadId}`);
             if (elements.downloadDiagnosticsSummary) {
                 elements.downloadDiagnosticsSummary.textContent = '单图下载成功！';
             }
+
+            // 若开启自动关页，且该图关联了标签页（关页由后台在下载落盘完成后执行）
+            if (state.autoCloseTabs) {
+                const tabIdsToClose = extractTabIdsFromImg(image);
+                if (tabIdsToClose.length > 0) {
+                    if (elements.downloadDiagnosticsLog) elements.downloadDiagnosticsLog.classList.remove('hidden');
+                    appendDiagnosticsLog(`[自动关页] 已登记 ${tabIdsToClose.length} 个关联标签页 (IDs: ${tabIdsToClose.join(', ')})，后台将在下载落盘完成后自动关闭。`);
+                } else {
+                    appendDiagnosticsLog(`[单图关页提示] 该图片未绑定有效来源标签页 ID (tabId: ${image.tabId})`);
+                }
+            }
+
             setTimeout(() => {
                 if (elements.downloadDiagnostics) elements.downloadDiagnostics.classList.add('hidden');
-            }, 3000);
+            }, 4000);
         } else {
             appendDiagnosticsLog(`下载失败: ${response?.error || '未知错误'}`);
         }
@@ -1017,7 +1082,7 @@ async function downloadSelected() {
     const folder = state.downloadFolder || 'images';
     let successCount = 0;
     let failCount = 0;
-    const successfulTabIds = new Set(); // 搜集下载成功的关联 tabId
+    const successfulTabIds = new Set(); // 搜集下载成功的关联 tabId 集合
 
     showDiagnostics(`开始批量下载 ${selectedIndices.length} 张图片到文件夹: ${folder}`);
 
@@ -1037,12 +1102,15 @@ async function downloadSelected() {
                 action: 'download',
                 url: image.src,
                 filename: filename,
-                folder: folder
+                folder: folder,
+                tabId: image.tabId,
+                autoClose: state.autoCloseTabs
             });
 
             if (response && response.success) {
                 successCount++;
-                if (image.tabId) successfulTabIds.add(image.tabId);
+                const extractedIds = extractTabIdsFromImg(image);
+                extractedIds.forEach(id => successfulTabIds.add(id));
                 appendDiagnosticsLog(`[${i + 1}/${selectedIndices.length}] 下载成功 ID: ${response.downloadId} (${filename || '原始文件名'})`);
             } else {
                 failCount++;
@@ -1061,15 +1129,14 @@ async function downloadSelected() {
         elements.downloadDiagnosticsSummary.textContent = `下载完成: 成功 ${successCount}，失败 ${failCount}`;
     }
 
-    // 自动关闭已成功下载图片的标签页
-    if (state.autoCloseTabs && successfulTabIds.size > 0) {
-        try {
-            const tabIdsToClose = Array.from(successfulTabIds);
-            appendDiagnosticsLog(`正在自动关闭已下载图片关联的 ${tabIdsToClose.length} 个标签页...`);
-            await chrome.tabs.remove(tabIdsToClose);
-            appendDiagnosticsLog(`已成功关闭相关标签页！`);
-        } catch (tabErr) {
-            appendDiagnosticsLog(`自动关闭标签页提示: ${tabErr.message}`);
+    // 自动关页统一由后台 Service Worker 在下载落盘完成后执行
+    // （前端提前关页会打断仍在进行的下载连接，且与"下载完成后关页"的设计语义不符）
+    if (state.autoCloseTabs) {
+        if (successfulTabIds.size > 0) {
+            if (elements.downloadDiagnosticsLog) elements.downloadDiagnosticsLog.classList.remove('hidden');
+            appendDiagnosticsLog(`[自动关页] 已为 ${successfulTabIds.size} 个关联标签页登记自动关闭，后台将在对应下载落盘完成后自动关闭。`);
+        } else {
+            appendDiagnosticsLog(`[关页提示] 未收集到任何关联标签页 ID 或图片下载均未成功，跳过自动关页。`);
         }
     }
 
