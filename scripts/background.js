@@ -76,28 +76,98 @@ async function loadTrackerState() {
     }
 }
 
-const trackerStateReady = loadTrackerState();
+/**
+ * 扫描并结算所有已终态/已消失的追踪记录（幂等，可反复执行）。
+ *
+ * 两个用途：
+ * 1. SW 启动时自愈：清理旧版本竞态缺陷遗留的、永远无法消费的 pending
+ *    记录与归不了零的计数（这类污染会导致自动关页永久失效）；
+ * 2. 周期性兑底：MV3 下 onChanged 事件在 SW 被终止期间可能丢失，
+ *    由 chrome.alarms 定时唤醒后重扫，确保悬挂任务最终被结算、标签页必被关闭。
+ */
+async function sweepFinishedDownloads() {
+    if (pendingDownloadTabs.size === 0) {
+        syncSweepAlarm();
+        return;
+    }
+
+    for (const [downloadId] of [...pendingDownloadTabs]) {
+        try {
+            const items = await chrome.downloads.search({ id: downloadId });
+            const item = items && items[0];
+            if (!item) {
+                // 下载项已从历史移除，无法再收到事件，按中断结算
+                console.log(`[自动关页] 扫描: 下载 ${downloadId} 已从历史移除，按中断结算`);
+                handleDownloadFinished(downloadId, 'interrupted');
+            } else if (item.state === 'complete' || item.state === 'interrupted') {
+                console.log(`[自动关页] 扫描: 下载 ${downloadId} 已终态 (${item.state})，执行结算`);
+                handleDownloadFinished(downloadId, item.state);
+            }
+        } catch (err) {
+            console.log('扫描结算下载追踪记录失败:', err);
+        }
+    }
+
+    syncSweepAlarm();
+}
+
+// ============================================================
+// 周期性兑底扫描定时器 (chrome.alarms)
+// ============================================================
+// chrome.downloads.onChanged 事件在 Service Worker 被终止期间可能无法可靠
+// 唤醒 SW（MV3 已知缺陷），一旦 complete 事件丢失，追踪记录将永久悬挂。
+// alarms 由浏览器内核调度，不依赖下载事件，能确保 SW 被唤醒重扫。
+const SWEEP_ALARM_NAME = 'autoCloseTabSweep';
 
 /**
- * 将追踪状态写回 chrome.storage.session（异步，失败不影响主流程）
+ * 根据当前是否存在未完成的追踪记录，同步创建/清除兑底扫描定时器
+ */
+function syncSweepAlarm() {
+    try {
+        if (pendingDownloadTabs.size > 0) {
+            chrome.alarms.create(SWEEP_ALARM_NAME, { periodInMinutes: 0.5 });
+        } else {
+            chrome.alarms.clear(SWEEP_ALARM_NAME);
+        }
+    } catch (err) {
+        console.log('同步兑底扫描定时器失败:', err);
+    }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== SWEEP_ALARM_NAME) return;
+    console.log('[自动关页] 定时器唤醒，执行兑底扫描');
+    trackerStateReady.then(sweepFinishedDownloads);
+});
+
+const trackerStateReady = loadTrackerState().then(sweepFinishedDownloads);
+
+/**
+ * 将追踪状态写回 chrome.storage.session（异步，任何失败都不影响主流程）
  */
 function saveTrackerState() {
-    chrome.storage.session.set({
-        [SESSION_STATE_KEY]: {
-            pendingDownloadTabs: Object.fromEntries(pendingDownloadTabs),
-            tabPendingCounts: Object.fromEntries(tabPendingCounts)
-        }
-    }).catch(err => console.log('保存下载追踪状态失败:', err));
+    try {
+        chrome.storage.session.set({
+            [SESSION_STATE_KEY]: {
+                pendingDownloadTabs: Object.fromEntries(pendingDownloadTabs),
+                tabPendingCounts: Object.fromEntries(tabPendingCounts)
+            }
+        }).catch(err => console.log('保存下载追踪状态失败:', err));
+    } catch (err) {
+        console.log('保存下载追踪状态失败:', err);
+    }
 }
 
 function setPendingDownload(downloadId, info) {
     pendingDownloadTabs.set(downloadId, info);
     saveTrackerState();
+    syncSweepAlarm();
 }
 
 function deletePendingDownload(downloadId) {
     pendingDownloadTabs.delete(downloadId);
     saveTrackerState();
+    syncSweepAlarm();
 }
 
 function incrementTabCount(tabId) {
@@ -120,33 +190,53 @@ function decrementTabCount(tabId) {
 }
 
 /**
- * 监听 Chrome 下载任务状态改变，当关联标签页的所有图片在磁盘保存完毕 (complete) 后平滑关页
+ * 下载进入终态 (complete / interrupted) 后的统一处理入口（幂等）。
+ *
+ * 只有登记过追踪记录的下载才会被处理；处理前立即删除记录，
+ * 保证 onChanged 事件与注册后的补偿查询即使同时到达也只生效一次。
+ *
+ * @param {number} downloadId - 下载 ID
+ * @param {string} finalState - 终态：'complete' | 'interrupted'
+ */
+function handleDownloadFinished(downloadId, finalState) {
+    const info = pendingDownloadTabs.get(downloadId);
+    if (!info) return; // 未登记或已处理过，直接跳过
+
+    deletePendingDownload(downloadId);
+
+    const { tabId, autoClose } = info;
+    if (!autoClose || !tabId) return;
+    // 防御：计数记录不存在时不做任何递减/关页，避免误关仍有下载进行的标签页
+    if (!tabPendingCounts.has(tabId)) {
+        console.log(`[自动关页] 下载 ${downloadId} 终态 (${finalState})，但标签页 ${tabId} 无计数记录，跳过`);
+        return;
+    }
+
+    const remaining = decrementTabCount(tabId);
+    console.log(`[自动关页] 下载 ${downloadId} 终态 (${finalState})，标签页 ${tabId} 剩余任务数: ${remaining}`);
+    // 仅当此 tabId 的所有下载任务全部结束且该图下载成功时，才关闭标签页
+    if (remaining <= 0 && finalState === 'complete') {
+        console.log(`[自动关页] 标签页 ${tabId} 所有下载已落盘完成，执行关闭`);
+        chrome.tabs.remove(tabId).then(() => {
+            console.log(`[自动关页] 标签页 ${tabId} 已成功关闭`);
+        }).catch(err => {
+            console.log(`后台自动关闭标签页 (ID: ${tabId}) 失败:`, err);
+        });
+    }
+}
+
+/**
+ * 监听 Chrome 下载任务状态改变，当关联标签页的所有图片在磁盘保存完毕后平滑关页
  */
 chrome.downloads.onChanged.addListener((delta) => {
     if (!delta.state) return;
+    const finalState = delta.state.current;
+    if (finalState !== 'complete' && finalState !== 'interrupted') return;
 
+    console.log(`[自动关页] onChanged 事件: 下载 ${delta.id} -> ${finalState}`);
     // 等待追踪状态恢复完成后再处理，避免状态尚未加载时误判
     trackerStateReady.then(() => {
-        const downloadId = delta.id;
-        const info = pendingDownloadTabs.get(downloadId);
-
-        if (info) {
-            const { tabId, autoClose } = info;
-            // 当单个文件下载成功 complete 或中断 interrupted 时
-            if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
-                deletePendingDownload(downloadId);
-
-                if (autoClose && tabId) {
-                    const remaining = decrementTabCount(tabId);
-                    // 仅当此 tabId 的所有下载任务全部完成且该图下载成功时，触发标签页关闭
-                    if (remaining <= 0 && delta.state.current === 'complete') {
-                        chrome.tabs.remove(tabId).catch(err => {
-                            console.log(`后台自动关闭标签页 (ID: ${tabId}) 提示:`, err);
-                        });
-                    }
-                }
-            }
-        }
+        handleDownloadFinished(delta.id, finalState);
     });
 });
 
@@ -171,22 +261,51 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const tabId = request.tabId;
             const autoClose = Boolean(request.autoClose);
 
+            console.log(`[自动关页] 收到下载请求: tabId=${tabId}, autoClose=${autoClose}, url=${request.url}`);
+
             // 如果开启了自动关页且有合法 tabId，递增计数
             if (autoClose && tabId) {
                 incrementTabCount(tabId);
+            } else if (!autoClose) {
+                console.log('[自动关页] 警告: autoClose 为 false，不会登记关页追踪（请确认前端开关状态与设置同步）');
+            } else {
+                console.log(`[自动关页] 警告: tabId 无效 (${tabId})，无法登记关页追踪`);
             }
 
             // 调用下载函数，处理图片下载
             downloadImage(request.url, request.filename, request.folder)
                 .then(result => {
-                    if (autoClose && tabId && result.downloadId) {
-                        setPendingDownload(result.downloadId, { tabId, autoClose });
+                    // 登记失败绝不能阻塞 sendResponse，否则前端会一直等待
+                    try {
+                        if (autoClose && tabId && result.downloadId) {
+                            setPendingDownload(result.downloadId, { tabId, autoClose });
+                            console.log(`[自动关页] 已登记下载 ${result.downloadId} -> 标签页 ${tabId}，当前该页计数: ${tabPendingCounts.get(tabId)}`);
+
+                            // 竞态补偿：小图/缓存资源可能在登记之前就已完成落盘，
+                            // onChanged 的 complete 事件会因查不到记录而被永久错过，
+                            // 导致计数无法归零、标签页永不关闭。因此登记后立即主动
+                            // 查询一次当前状态，若已终态则直接处理（幂等，不重复关页）。
+                            chrome.downloads.search({ id: result.downloadId })
+                                .then(items => {
+                                    const item = items && items[0];
+                                    if (item && (item.state === 'complete' || item.state === 'interrupted')) {
+                                        handleDownloadFinished(result.downloadId, item.state);
+                                    }
+                                })
+                                .catch(err => console.log('补偿查询下载状态失败:', err));
+                        }
+                    } catch (err) {
+                        console.log('登记下载追踪失败:', err);
                     }
                     sendResponse({ success: true, ...result });
                 })
                 .catch(error => {
-                    if (autoClose && tabId) {
-                        decrementTabCount(tabId);
+                    try {
+                        if (autoClose && tabId) {
+                            decrementTabCount(tabId);
+                        }
+                    } catch (err) {
+                        console.log('递减下载追踪计数失败:', err);
                     }
                     sendResponse({ success: false, error: error.message });
                 });

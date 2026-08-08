@@ -121,6 +121,18 @@ async function init() {
     });
   }
 
+  // 跨上下文设置实时同步：画廊页中切换自动关页开关时，popup 内存状态
+  // 不会自动更新，会导致下载时仍传旧值 (autoClose=false)
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes[STORAGE_KEY]) return;
+    const next = changes[STORAGE_KEY].newValue;
+    if (!next || typeof next.autoCloseTabs !== 'boolean') return;
+    if (next.autoCloseTabs !== state.autoCloseTabs) {
+      state.autoCloseTabs = next.autoCloseTabs;
+      if (elements.autoCloseTabsToggle) elements.autoCloseTabsToggle.checked = next.autoCloseTabs;
+    }
+  });
+
   // 加载已保存设置并渲染到 UI
   await loadSettings();
   applySettingsToUI();
@@ -502,17 +514,15 @@ async function downloadSelected() {
         autoClose: state.autoCloseTabs
       });
 
-      if (response?.success) {
-        // 自动关页由后台 Service Worker 在下载落盘完成后统一执行，前端不做提前关页
-      } else {
+      if (!response?.success) {
         throw new Error(response?.error || '下载失败');
       }
+      // 自动关页统一由后台 Service Worker 在下载落盘完成后执行：
+      // popup 失去焦点即被销毁，不能承担长时轮询任务，否则关页逻辑会被中断
     } catch (error) {
       console.error('下载失败:', url, error);
     }
   }
-
-  // 自动关页由后台 Service Worker 在下载落盘完成后统一执行（关页时机更准确、跨 SW 重启可靠）
 
   state.selectedImages.clear();
   document.querySelectorAll('.image-card.selected').forEach(card => {
