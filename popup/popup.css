@@ -139,10 +139,7 @@ body::-webkit-scrollbar-thumb {
 .btn-secondary.active {
   background: var(--accent-primary);
   border-color: var(--accent-primary);
-}
-
-.btn-secondary.active .checkbox-icon::before {
-  content: '☑';
+  color: white;
 }
 
 .btn-primary {
@@ -286,13 +283,6 @@ body::-webkit-scrollbar-thumb {
 .image-card.selected .check-indicator {
   background: var(--accent-primary);
   border-color: var(--accent-primary);
-}
-
-.image-card.selected .check-indicator::after {
-  content: '✓';
-  color: white;
-  font-size: 14px;
-  font-weight: bold;
 }
 
 /* 图片来源标签 */

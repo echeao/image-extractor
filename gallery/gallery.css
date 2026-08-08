@@ -342,7 +342,7 @@ body::-webkit-scrollbar-thumb:hover {
     white-space: nowrap;
 }
 
-/* 快速筛选按钮组 */
+/* 快速筛选与 Chip 按钮组 */
 .filter-controls {
     display: flex;
     flex-wrap: wrap;
@@ -371,6 +371,81 @@ body::-webkit-scrollbar-thumb:hover {
     background: var(--accent-primary);
     border-color: var(--accent-primary);
     box-shadow: var(--shadow-sm);
+}
+
+/* 格式与比例 Chip 胶囊选择器 */
+.chip-btn {
+    padding: 5px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    border-radius: 16px;
+    cursor: pointer;
+    transition: var(--transition-fast);
+    white-space: nowrap;
+}
+
+.chip-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent-primary);
+    transform: translateY(-1px);
+}
+
+.chip-btn.active {
+    color: #ffffff;
+    background: var(--accent-gradient);
+    border-color: transparent;
+    box-shadow: 0 2px 10px var(--accent-glow);
+}
+
+/* 5.4 卡片中央 Hover 悬浮工具栏 (放大预览、复制 URL、单图下载) */
+.image-card .card-hover-tools {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(0.85);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(15, 23, 42, 0.78);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-radius: 22px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    opacity: 0;
+    pointer-events: none;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 10;
+}
+
+.image-card:hover .card-hover-tools {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, -50%) scale(1);
+}
+
+.hover-tool-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.hover-tool-btn:hover {
+    background: var(--accent-primary);
+    border-color: #ffffff;
+    transform: scale(1.18);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
 
 /* 表单输入组 */
@@ -712,11 +787,13 @@ body.canvas-checkerboard {
     box-shadow: 0 2px 8px var(--accent-glow);
 }
 
-.image-card.selected .check-indicator::after {
-    content: '✓';
-    color: #ffffff;
-    font-size: 14px;
-    font-weight: 800;
+.image-card .check-indicator svg {
+    opacity: 0;
+    transition: var(--transition-fast);
+}
+
+.image-card.selected .check-indicator svg {
+    opacity: 1;
 }
 
 /* 5.2 格式 Badge (PNG, JPG, WEBP, GIF, SVG 等) */

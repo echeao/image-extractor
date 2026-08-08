@@ -53,7 +53,7 @@ Image Extractor - Gallery Page (画廊主页面)
             <!-- 
             ========== 极简主控制栏 (.primary-bar) ==========
             左侧：Logo、标题与动态统计
-            右侧：刷新、全选、核心下载按钮、模式切换、主题切换、设置开合按钮
+            右侧：刷新、全选、反选、核心下载按钮、主题切换、设置开合按钮
             -->
             <header class="primary-bar">
                 <!-- 左侧区域：品牌与统计 -->
@@ -76,16 +76,31 @@ Image Extractor - Gallery Page (画廊主页面)
                 <!-- 右侧区域：核心交互控件组 -->
                 <div class="header-right">
                     <!-- 刷新提取按钮 -->
-                    <button class="btn btn-icon" id="refreshBtn" title="重新扫描图片">
+                    <button class="btn btn-icon" id="refreshBtn" title="重新扫描标签页图片">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
                         </svg>
                     </button>
 
-                    <!-- 全选/取消全选按钮 -->
-                    <button class="btn btn-secondary" id="selectAllBtn" title="切换全选">
-                        <span class="checkbox-icon">☐</span>
+                    <!-- 全选按钮 (使用精美的 SVG 复选框图标) -->
+                    <button class="btn btn-secondary" id="selectAllBtn" title="全选当前筛选图片">
+                        <span class="checkbox-icon">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect>
+                            </svg>
+                        </span>
                         <span class="btn-text">全选</span>
+                    </button>
+
+                    <!-- 反选按钮 (使用双向循环矢量的 SVG 图标) -->
+                    <button class="btn btn-secondary" id="invertSelectBtn" title="反向选择图片">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="17 1 21 5 17 9"></polyline>
+                            <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                            <polyline points="7 23 3 19 7 15"></polyline>
+                            <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                        </svg>
+                        <span class="btn-text">反选</span>
                     </button>
 
                     <!-- 核心下载按钮 (使用突出渐变与 Glowing 效果) -->
@@ -95,17 +110,6 @@ Image Extractor - Gallery Page (画廊主页面)
                         </svg>
                         <span class="btn-text">下载选中</span>
                     </button>
-
-                    <div class="divider-vertical"></div>
-
-                    <!-- 点击行为模式切换开关（选择模式 vs 预览模式） -->
-                    <div class="mouse-action-switch" title="切换点击图片时的行为：选择图片或大图预览">
-                        <span class="switch-text" id="switchText">选择模式</span>
-                        <label class="switch">
-                            <input type="checkbox" id="mouseActionToggle" aria-label="开启预览模式">
-                            <span class="slider round"></span>
-                        </label>
-                    </div>
 
                     <div class="divider-vertical"></div>
 
@@ -141,9 +145,11 @@ Image Extractor - Gallery Page (画廊主页面)
             <!-- 
             ========== 折叠式高级筛选/设置面板 (.filter-panel) ==========
             分模块排布：
-            1. 尺寸与分辨率过滤 (快速预设 + 自定义尺寸)
-            2. 重命名与导出子目录 (批量前缀 + 文件夹)
-            3. 视图样式与画布选项 (列数滑块 + 画布背景选择)
+            1. 尺寸与分辨率过滤 (快速预设 + 自定义宽高)
+            2. 图片格式筛选 (PNG / JPG / WebP / SVG / GIF)
+            3. 宽高比例筛选 (横图 / 竖图 / 方形)
+            4. 重命名与导出子目录 (批量前缀 + 文件夹 + 自动关页)
+            5. 视图样式与画布选项 (列数滑块 + 画布背景选择)
             -->
             <div class="filter-panel collapsed" id="filterPanel">
                 <div class="panel-inner">
@@ -186,7 +192,46 @@ Image Extractor - Gallery Page (画廊主页面)
                             </div>
                         </div>
 
-                        <!-- 模块 2：导出与重命名配置 -->
+                        <!-- 模块 2：图片格式筛选 -->
+                        <div class="panel-card">
+                            <div class="panel-card-title">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14 2 14 8 20 8"></polyline>
+                                </svg>
+                                文件格式
+                            </div>
+                            <div class="panel-card-content">
+                                <div class="filter-controls format-controls" id="formatFilterGroup">
+                                    <button class="chip-btn active" data-format="all">全部格式</button>
+                                    <button class="chip-btn" data-format="PNG">PNG</button>
+                                    <button class="chip-btn" data-format="JPG">JPG/JPEG</button>
+                                    <button class="chip-btn" data-format="WEBP">WEBP</button>
+                                    <button class="chip-btn" data-format="SVG">SVG</button>
+                                    <button class="chip-btn" data-format="GIF">GIF</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 模块 3：宽高比例筛选 -->
+                        <div class="panel-card">
+                            <div class="panel-card-title">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                </svg>
+                                图像比例
+                            </div>
+                            <div class="panel-card-content">
+                                <div class="filter-controls ratio-controls" id="ratioFilterGroup">
+                                    <button class="chip-btn active" data-ratio="all">全部比例</button>
+                                    <button class="chip-btn" data-ratio="landscape">横图 (Landscape)</button>
+                                    <button class="chip-btn" data-ratio="portrait">竖图 (Portrait)</button>
+                                    <button class="chip-btn" data-ratio="square">方形 (Square)</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 模块 4：导出与重命名配置 -->
                         <div class="panel-card">
                             <div class="panel-card-title">
                                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -226,7 +271,7 @@ Image Extractor - Gallery Page (画廊主页面)
                             </div>
                         </div>
 
-                        <!-- 模块 3：视图与画布控制 -->
+                        <!-- 模块 5：视图与画布控制 -->
                         <div class="panel-card">
                             <div class="panel-card-title">
                                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -264,9 +309,15 @@ Image Extractor - Gallery Page (画廊主页面)
 
                     </div>
 
-                    <!-- 面板底部状态与结果汇总 -->
+                    <!-- 面板底部状态与结果汇总与重置按钮 -->
                     <div class="panel-footer">
                         <span class="filter-stats" id="filterStats">正在统计筛选数据...</span>
+                        <button class="btn btn-text-action" id="resetFilterBtn" title="恢复默认筛选条件">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path>
+                            </svg>
+                            <span>重置所有筛选</span>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -288,7 +339,12 @@ Image Extractor - Gallery Page (画廊主页面)
         ============================================================
         -->
         <div class="empty-state hidden" id="emptyState">
-            <div class="empty-icon">📭</div>
+            <div class="empty-icon">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 12h-6l-2 3h-4l-2-3H2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-7z"></path>
+                    <path d="M5.45 5.11L2 12v0h20v0l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
+                </svg>
+            </div>
             <p>未找到任何图片</p>
             <span class="empty-hint">请打开包含图片的网页后点击刷新</span>
         </div>
@@ -313,7 +369,15 @@ Image Extractor - Gallery Page (画廊主页面)
                 <strong id="downloadDiagnosticsSummary">准备下载...</strong>
             </div>
             <div class="diagnostics-actions">
-                <button class="btn-text-action" id="toggleLogBtn" title="展开/收起诊断日志">日志 📜</button>
+                <button class="btn-text-action" id="toggleLogBtn" title="展开/收起诊断日志">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                    </svg>
+                    <span>诊断日志</span>
+                </button>
                 <button class="btn-close-diagnostics" id="closeDiagnosticsBtn" title="关闭诊断框">&times;</button>
             </div>
         </div>

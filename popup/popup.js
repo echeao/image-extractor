@@ -1,6 +1,6 @@
 /**
  * Image Extractor - Popup Script
- * 负责协调图片提取、展示和下载
+ * 负责协调图片提取、展示和下载 (全矢量 SVG 图标版本，零 Emoji)
  */
 
 // ========== 全局状态 ==========
@@ -11,7 +11,7 @@ const state = {
   isAllSelected: false,    // 是否全选
   minResolution: 500,      // 默认最小分辨率 500px
   isRenaming: false,       // 是否开启重命名
-  renamePrefix: ''         // 重命名缀
+  renamePrefix: ''         // 重命名前缀
 };
 
 // ========== DOM 元素 ==========
@@ -21,10 +21,10 @@ const elements = {
   masonry: document.getElementById('masonry'),
   stats: document.getElementById('stats'),
   filterStats: document.getElementById('filterStats'),
+  openGalleryBtn: document.getElementById('openGalleryBtn'),
   refreshBtn: document.getElementById('refreshBtn'),
   selectAllBtn: document.getElementById('selectAllBtn'),
   downloadBtn: document.getElementById('downloadBtn'),
-  // Rename controls
   renameToggle: document.getElementById('renameToggle'),
   renamePrefix: document.getElementById('renamePrefix')
 };
@@ -33,12 +33,17 @@ const elements = {
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
-  // 绑定事件
-  elements.refreshBtn.addEventListener('click', extractImages);
-  elements.selectAllBtn.addEventListener('click', toggleSelectAll);
-  elements.downloadBtn.addEventListener('click', downloadSelected);
+  // 绑定主画廊与核心按钮事件
+  if (elements.openGalleryBtn) {
+    elements.openGalleryBtn.addEventListener('click', () => {
+      chrome.tabs.create({ url: chrome.runtime.getURL('gallery/gallery.html') });
+    });
+  }
+  if (elements.refreshBtn) elements.refreshBtn.addEventListener('click', extractImages);
+  if (elements.selectAllBtn) elements.selectAllBtn.addEventListener('click', toggleSelectAll);
+  if (elements.downloadBtn) elements.downloadBtn.addEventListener('click', downloadSelected);
 
-  // 绑定筛选按钮事件
+  // 绑定分辨率筛选按钮事件
   document.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const minRes = parseInt(btn.dataset.min, 10);
@@ -46,13 +51,15 @@ async function init() {
     });
   });
 
-  // Rename control events
-  elements.renameToggle.addEventListener('change', toggleRename);
-  elements.renamePrefix.addEventListener('input', (e) => {
-    const sanitized = sanitizeFilenamePart(e.target.value);
-    e.target.value = sanitized;
-    state.renamePrefix = sanitized;
-  });
+  // 批量重命名控制
+  if (elements.renameToggle) elements.renameToggle.addEventListener('change', toggleRename);
+  if (elements.renamePrefix) {
+    elements.renamePrefix.addEventListener('input', (e) => {
+      const sanitized = sanitizeFilenamePart(e.target.value);
+      e.target.value = sanitized;
+      state.renamePrefix = sanitized;
+    });
+  }
 
   // 开始提取图片
   await extractImages();
@@ -62,27 +69,22 @@ async function init() {
 function setMinResolution(minRes, activeBtn) {
   state.minResolution = minRes;
 
-  // 更新按钮状态
   document.querySelectorAll('.filter-btn').forEach(btn => {
     btn.classList.remove('active');
   });
-  activeBtn.classList.add('active');
+  if (activeBtn) activeBtn.classList.add('active');
 
-  // 重新过滤并渲染
   applyFilter();
 }
 
 function applyFilter() {
-  // 清空选择
   state.selectedImages.clear();
 
-  // 根据分辨率过滤
   state.filteredImages = state.images.filter(img => {
     const maxDim = Math.max(img.width || 0, img.height || 0);
     return maxDim >= state.minResolution;
   });
 
-  // 更新筛选统计
   updateFilterStats();
 
   if (state.filteredImages.length === 0) {
@@ -97,10 +99,12 @@ function updateFilterStats() {
   const filtered = state.filteredImages.length;
   const hidden = total - filtered;
 
-  if (hidden > 0) {
-    elements.filterStats.textContent = `已过滤 ${hidden} 张`;
-  } else {
-    elements.filterStats.textContent = '';
+  if (elements.filterStats) {
+    if (hidden > 0) {
+      elements.filterStats.textContent = `已过滤 ${hidden} 张`;
+    } else {
+      elements.filterStats.textContent = '';
+    }
   }
 }
 
@@ -114,10 +118,7 @@ async function extractImages() {
   updateDownloadButton();
 
   try {
-    // 获取所有标签页
     const tabs = await chrome.tabs.query({});
-
-    // 过滤掉 Chrome 内部页面
     const validTabs = tabs.filter(tab =>
       tab.url &&
       !tab.url.startsWith('chrome://') &&
@@ -131,10 +132,8 @@ async function extractImages() {
       return;
     }
 
-    // 向每个标签页注入内容脚本并提取图片
     const imagePromises = validTabs.map(async (tab) => {
       try {
-        // 注入并执行内容脚本
         const results = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: extractImagesFromPage
@@ -153,12 +152,10 @@ async function extractImages() {
       return [];
     });
 
-    // 等待所有提取完成
     const allImages = await Promise.all(imagePromises);
-
-    // 扁平化并去重
     const flatImages = allImages.flat();
     const seenUrls = new Set();
+
     state.images = flatImages.filter(img => {
       if (seenUrls.has(img.src)) return false;
       seenUrls.add(img.src);
@@ -168,7 +165,6 @@ async function extractImages() {
     if (state.images.length === 0) {
       showEmptyState();
     } else {
-      // 应用筛选（默认 500px）
       applyFilter();
     }
   } catch (error) {
@@ -178,14 +174,12 @@ async function extractImages() {
 }
 
 /**
- * 在页面中执行的图片提取函数
- * 会被注入到每个标签页中执行
+ * 注入到标签页中执行的图片提取脚本
  */
 function extractImagesFromPage() {
   const images = [];
   const seenSrcs = new Set();
 
-  // 提取所有 <img> 标签
   document.querySelectorAll('img').forEach(img => {
     const src = img.src || img.dataset.src || img.dataset.lazySrc;
     if (src && !seenSrcs.has(src) && isValidImage(img, src)) {
@@ -198,7 +192,6 @@ function extractImagesFromPage() {
     }
   });
 
-  // 提取背景图片
   document.querySelectorAll('*').forEach(el => {
     const style = window.getComputedStyle(el);
     const bgImage = style.backgroundImage;
@@ -215,7 +208,6 @@ function extractImagesFromPage() {
     }
   });
 
-  // 提取 <picture> 和 <source>
   document.querySelectorAll('picture source').forEach(source => {
     const srcset = source.srcset;
     if (srcset) {
@@ -230,17 +222,11 @@ function extractImagesFromPage() {
   });
 
   function isValidImage(img, src) {
-    // 过滤太小的图片（可能是图标）- 提取时只过滤非常小的
     const width = img.naturalWidth || img.width || 0;
     const height = img.naturalHeight || img.height || 0;
     if (width > 0 && width < 30 && height > 0 && height < 30) return false;
-
-    // 过滤 data URL（base64 图标等）
     if (src.startsWith('data:') && src.length < 1000) return false;
-
-    // 过滤常见的追踪像素和占位图
     if (src.includes('pixel') || src.includes('tracking') || src.includes('spacer')) return false;
-
     return true;
   }
 
@@ -250,15 +236,17 @@ function extractImagesFromPage() {
 // ========== 渲染图片 ==========
 function renderImages() {
   hideLoader();
-  elements.emptyState.classList.add('hidden');
-  elements.masonry.classList.remove('hidden');
-  elements.masonry.innerHTML = '';
+  if (elements.emptyState) elements.emptyState.classList.add('hidden');
+  if (elements.masonry) {
+    elements.masonry.classList.remove('hidden');
+    elements.masonry.innerHTML = '';
+  }
 
   updateStats();
 
   state.filteredImages.forEach((image, index) => {
     const card = createImageCard(image, index);
-    elements.masonry.appendChild(card);
+    if (elements.masonry) elements.masonry.appendChild(card);
   });
 }
 
@@ -267,16 +255,18 @@ function createImageCard(image, index) {
   card.className = 'image-card';
   card.dataset.index = index;
 
+  if (state.selectedImages.has(index)) {
+    card.classList.add('selected');
+  }
+
   const img = document.createElement('img');
   img.src = image.src;
   img.alt = `Image ${index + 1}`;
   img.loading = 'lazy';
 
-  // 分辨率标签
   const resolutionTag = document.createElement('div');
   resolutionTag.className = 'resolution-tag';
 
-  // 图片加载成功时更新分辨率
   img.onload = () => {
     if (!image.width || !image.height) {
       image.width = img.naturalWidth;
@@ -286,12 +276,10 @@ function createImageCard(image, index) {
     updateResolutionTagClass(resolutionTag, image.width, image.height);
   };
 
-  // 图片加载失败时隐藏卡片
   img.onerror = () => {
     card.style.display = 'none';
   };
 
-  // 如果已有分辨率信息，直接显示
   if (image.width && image.height) {
     resolutionTag.textContent = `${image.width} × ${image.height}`;
     updateResolutionTagClass(resolutionTag, image.width, image.height);
@@ -299,8 +287,10 @@ function createImageCard(image, index) {
     resolutionTag.textContent = '...';
   }
 
+  // 使用 SVG 替代字符对勾
   const checkIndicator = document.createElement('div');
   checkIndicator.className = 'check-indicator';
+  checkIndicator.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
 
   const sourceTag = document.createElement('div');
   sourceTag.className = 'source-tag';
@@ -311,7 +301,6 @@ function createImageCard(image, index) {
   card.appendChild(resolutionTag);
   card.appendChild(sourceTag);
 
-  // 点击选择/取消选择
   card.addEventListener('click', () => toggleImageSelection(card, index));
 
   return card;
@@ -327,7 +316,7 @@ function updateResolutionTagClass(tag, width, height) {
   }
 }
 
-// ========== 选择逻辑 ==========
+// ========== 选择与下载逻辑 ==========
 function toggleImageSelection(card, index) {
   if (state.selectedImages.has(index)) {
     state.selectedImages.delete(index);
@@ -346,11 +335,9 @@ function toggleSelectAll() {
   const cards = document.querySelectorAll('.image-card');
 
   if (state.isAllSelected) {
-    // 取消全选
     state.selectedImages.clear();
     cards.forEach(card => card.classList.remove('selected'));
   } else {
-    // 全选
     cards.forEach((card, index) => {
       if (card.style.display !== 'none') {
         state.selectedImages.add(index);
@@ -367,20 +354,22 @@ function toggleSelectAll() {
 
 function updateSelectAllButton() {
   const btn = elements.selectAllBtn;
+  if (!btn) return;
   const visibleCards = document.querySelectorAll('.image-card:not([style*="display: none"])');
   state.isAllSelected = visibleCards.length > 0 && state.selectedImages.size === visibleCards.length;
 
   if (state.isAllSelected) {
     btn.classList.add('active');
-    btn.innerHTML = '<span class="checkbox-icon">☑</span> 取消全选';
+    btn.innerHTML = '<span class="checkbox-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3" ry="3" fill="currentColor"></rect><polyline points="9 11 12 14 22 4" stroke="#ffffff" stroke-width="2.5"></polyline></svg></span> 全选';
   } else {
     btn.classList.remove('active');
-    btn.innerHTML = '<span class="checkbox-icon">☐</span> 全选';
+    btn.innerHTML = '<span class="checkbox-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect></svg></span> 全选';
   }
 }
 
 function updateDownloadButton() {
   const btn = elements.downloadBtn;
+  if (!btn) return;
   const count = state.selectedImages.size;
 
   btn.disabled = count === 0;
@@ -388,29 +377,25 @@ function updateDownloadButton() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
     </svg>
-    下载选中${count > 0 ? ` (${count})` : ''}
+    <span>下载选中${count > 0 ? ` (${count})` : ''}</span>
   `;
 }
 
-// ========== 下载功能 ==========
+// ========== 核心批量下载功能 ==========
 async function downloadSelected() {
   if (state.selectedImages.size === 0) return;
 
-  // 使用 filteredImages 的索引获取图片 URL
   const selectedIndices = Array.from(state.selectedImages);
   const total = selectedIndices.length;
-  // Calculate padding
   const padding = total.toString().length;
 
-  // 发送下载请求到 background script
   for (let i = 0; i < total; i++) {
     const index = selectedIndices[i];
     const url = state.filteredImages[index].src;
     let filename = null;
 
     if (state.isRenaming && state.renamePrefix) {
-      // Get original extension
-      let ext = '.jpg'; // default
+      let ext = '.jpg';
       try {
         const urlObj = new URL(url);
         const parts = urlObj.pathname.split('.');
@@ -420,11 +405,8 @@ async function downloadSelected() {
             ext = potentialExt;
           }
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
 
-      // Format number with leading zeros
       const num = (i + 1).toString().padStart(padding, '0');
       filename = `${state.renamePrefix}_${num}${ext}`;
     }
@@ -437,14 +419,13 @@ async function downloadSelected() {
       });
 
       if (!response?.success) {
-        throw new Error(response?.error || '下载请求未成功执行');
+        throw new Error(response?.error || '下载失败');
       }
     } catch (error) {
       console.error('下载失败:', url, error);
     }
   }
 
-  // 清空选择
   state.selectedImages.clear();
   document.querySelectorAll('.image-card.selected').forEach(card => {
     card.classList.remove('selected');
@@ -456,11 +437,8 @@ async function downloadSelected() {
 
 function toggleRename(e) {
   state.isRenaming = e.target.checked;
-  elements.renamePrefix.disabled = !state.isRenaming;
-
-  if (state.isRenaming) {
-    elements.renamePrefix.focus();
-  }
+  if (elements.renamePrefix) elements.renamePrefix.disabled = !state.isRenaming;
+  if (state.isRenaming && elements.renamePrefix) elements.renamePrefix.focus();
 }
 
 function sanitizeFilenamePart(value) {
@@ -475,26 +453,28 @@ function updateStats() {
   const total = state.filteredImages.length;
   const selected = state.selectedImages.size;
 
-  if (selected > 0) {
-    elements.stats.textContent = `已选择 ${selected} / ${total} 张图片`;
-  } else {
-    elements.stats.textContent = `共 ${total} 张图片`;
+  if (elements.stats) {
+    if (selected > 0) {
+      elements.stats.textContent = `已选择 ${selected} / ${total} 张`;
+    } else {
+      elements.stats.textContent = `共 ${total} 张图片`;
+    }
   }
 }
 
 function showLoader() {
-  elements.loader.classList.remove('hidden');
-  elements.emptyState.classList.add('hidden');
-  elements.masonry.classList.add('hidden');
+  if (elements.loader) elements.loader.classList.remove('hidden');
+  if (elements.emptyState) elements.emptyState.classList.add('hidden');
+  if (elements.masonry) elements.masonry.classList.add('hidden');
 }
 
 function hideLoader() {
-  elements.loader.classList.add('hidden');
+  if (elements.loader) elements.loader.classList.add('hidden');
 }
 
 function showEmptyState() {
-  elements.loader.classList.add('hidden');
-  elements.emptyState.classList.remove('hidden');
-  elements.masonry.classList.add('hidden');
-  elements.stats.textContent = '未找到图片';
+  hideLoader();
+  if (elements.emptyState) elements.emptyState.classList.remove('hidden');
+  if (elements.masonry) elements.masonry.classList.add('hidden');
+  if (elements.stats) elements.stats.textContent = '未找到图片';
 }
