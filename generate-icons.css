@@ -1,0 +1,33 @@
+body {
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+h1 {
+    color: #333;
+}
+
+.icon-grid {
+    display: flex;
+    gap: 20px;
+    margin-top: 20px;
+}
+
+.icon-item {
+    text-align: center;
+}
+
+.download-section {
+    margin-top: 20px;
+}
+
+.download-section a {
+    display: inline-block;
+    margin-bottom: 8px;
+    color: #6366f1;
+    text-decoration: none;
+}
+
+.download-section a:hover {
+    text-decoration: underline;
+}

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generate Icons</title>
+    <link rel="stylesheet" href="generate-icons.css">
+</head>
+
+<body>
+    <h1>生成插件图标</h1>
+    <p>右键点击下方图片，选择"图片另存为"保存到 icons 文件夹</p>
+
+    <div class="icon-grid">
+        <div class="icon-item">
+            <h3>icon16.png</h3>
+            <canvas id="canvas16" width="16" height="16"></canvas>
+        </div>
+        <div class="icon-item">
+            <h3>icon48.png</h3>
+            <canvas id="canvas48" width="48" height="48"></canvas>
+        </div>
+        <div class="icon-item">
+            <h3>icon128.png</h3>
+            <canvas id="canvas128" width="128" height="128"></canvas>
+        </div>
+    </div>
+
+    <div class="download-section">
+        <h3>下载链接:</h3>
+        <a id="download16" download="icon16.png">下载 icon16.png</a><br>
+        <a id="download48" download="icon48.png">下载 icon48.png</a><br>
+        <a id="download128" download="icon128.png">下载 icon128.png</a>
+    </div>
+
+    <script>
+        function drawIcon(canvas, size) {
+            const ctx = canvas.getContext('2d');
+            const scale = size / 128;
+
+            // 背景渐变
+            const gradient = ctx.createLinearGradient(0, 0, size, size);
+            gradient.addColorStop(0, '#6366f1');
+            gradient.addColorStop(1, '#a855f7');
+
+            // 圆角矩形背景
+            const radius = 24 * scale;
+            ctx.beginPath();
+            ctx.roundRect(0, 0, size, size, radius);
+            ctx.fillStyle = gradient;
+            ctx.fill();
+
+            // 绘制瀑布流图标
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 6 * scale;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            function drawRoundedRect(x, y, w, h, r) {
+                ctx.beginPath();
+                ctx.roundRect(x * scale, y * scale, w * scale, h * scale, r * scale);
+                ctx.stroke();
+            }
+
+            drawRoundedRect(20, 20, 38, 50, 4);
+            drawRoundedRect(70, 20, 38, 30, 4);
+            drawRoundedRect(70, 60, 38, 48, 4);
+            drawRoundedRect(20, 80, 38, 28, 4);
+        }
+
+        // 绘制所有尺寸
+        const sizes = [16, 48, 128];
+        sizes.forEach(size => {
+            const canvas = document.getElementById('canvas' + size);
+            drawIcon(canvas, size);
+
+            // 创建下载链接
+            const link = document.getElementById('download' + size);
+            link.href = canvas.toDataURL('image/png');
+        });
+    </script>
+</body>
+
+</html>
