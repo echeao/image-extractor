@@ -632,10 +632,148 @@ function updateFilterStats() {
 }
 
 // ============================================================
+// 瀑布流 low-res 缩略图生成与显存回收池
+// ============================================================
+/**
+ * 记录页面中为高分辨率/4K 大图动态创建的 Canvas 缩略图 Blob URL 集合
+ * @type {Set<string>}
+ */
+const createdBlobUrls = new Set();
+
+/**
+ * 释放所有动态创建的缩略图 Blob URL 显存/内存
+ * 
+ * 职责说明：
+ * 在重新提取图片、重新筛选或页面销毁时统一调用 URL.revokeObjectURL，
+ * 防止离屏 Canvas 导出的 Blob 图像资源一直驻留显存造成内存泄漏。
+ * 
+ * @returns {void}
+ */
+function cleanupThumbnailBlobs() {
+    createdBlobUrls.forEach(url => {
+        try {
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.warn('清理缩略图 Blob URL 失败:', error);
+        }
+    });
+    createdBlobUrls.clear();
+}
+
+/**
+ * 利用离屏/临时 Canvas 将 4K 或高分辨率图片降采样缩放生成最大宽度 400px 的压缩缩略图 Blob URL
+ * 
+ * 职责说明：
+ * 瀑布流卡片仅作为图像辨识与筛选窗口，不需要直接解码 4K 巨幅画卷。
+ * 此函数快速将图像转绘制到小尺寸 Canvas 并导出轻量级 WebP Blob，
+ * 体积从 10MB+ 降低至 20KB~40KB，显著减轻显存与 CPU 解码压力。
+ * 
+ * @param {string} imageSrc 高清原图 URL 地址
+ * @param {Object} [imageObj=null] 可选的图像元数据对象，用于修正原图真实的物理分辨率
+ * @param {number} [maxDimension=400] 缩略图最大边长限制（默认 400px）
+ * @param {number} [quality=0.65] 导出图像压缩质量 (0.1 ~ 1.0)
+ * @returns {Promise<string|null>} 成功返回 Blob URL 字符串，若跨域受到 CORS 污染或尺寸本身极小则返回 null（降级使用原图）
+ */
+async function generateThumbnailBlobUrl(imageSrc, imageObj = null, maxDimension = 400, quality = 0.65) {
+    return new Promise((resolve) => {
+        // 避免给本身已经是 data: 或 blob: 且体量较小的 URL 重复转码
+        if (!imageSrc || imageSrc.startsWith('data:image/svg')) {
+            resolve(null);
+            return;
+        }
+
+        const tempImg = new Image();
+        tempImg.crossOrigin = 'anonymous'; // 尝试跨域许可
+        tempImg.src = imageSrc;
+
+        // 设置 3 秒超时熔断，防卡死
+        const timer = setTimeout(() => {
+            tempImg.src = '';
+            resolve(null);
+        }, 3000);
+
+        tempImg.onload = () => {
+            clearTimeout(timer);
+            try {
+                const originWidth = tempImg.naturalWidth || tempImg.width;
+                const originHeight = tempImg.naturalHeight || tempImg.height;
+
+                // 若原图像在提取时未拿到准确尺寸，利用加载成功的原图 Image 对象第一时间更新真实元数据，防止后续被缩略图尺寸篡改
+                if (imageObj && originWidth && originHeight) {
+                    if (!imageObj.width || !imageObj.height) {
+                        imageObj.width = originWidth;
+                        imageObj.height = originHeight;
+                    }
+                }
+
+                // 若原图尺寸小于等于目标缩略图边长，无需重复绘制 Canvas 压缩
+                if (!originWidth || !originHeight || (originWidth <= maxDimension && originHeight <= maxDimension)) {
+                    resolve(null);
+                    return;
+                }
+
+                // 按比例计算缩放后尺寸
+                let targetWidth = originWidth;
+                let targetHeight = originHeight;
+
+                if (targetWidth > targetHeight) {
+                    if (targetWidth > maxDimension) {
+                        targetHeight = Math.round((targetHeight * maxDimension) / targetWidth);
+                        targetWidth = maxDimension;
+                    }
+                } else {
+                    if (targetHeight > maxDimension) {
+                        targetWidth = Math.round((targetWidth * maxDimension) / targetHeight);
+                        targetHeight = maxDimension;
+                    }
+                }
+
+                // 创建临时 Canvas
+                const canvas = document.createElement('canvas');
+                canvas.width = targetWidth;
+                canvas.height = targetHeight;
+                const ctx = canvas.getContext('2d', { alpha: false });
+                if (!ctx) {
+                    resolve(null);
+                    return;
+                }
+
+                // 开启低/中度图像平滑缩放以提高绘制性能
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'medium';
+                ctx.drawImage(tempImg, 0, 0, targetWidth, targetHeight);
+
+                // 导出轻量级 webp Blob
+                canvas.toBlob((blob) => {
+                    if (blob) {
+                        const blobUrl = URL.createObjectURL(blob);
+                        createdBlobUrls.add(blobUrl);
+                        resolve(blobUrl);
+                    } else {
+                        resolve(null);
+                    }
+                }, 'image/webp', quality);
+            } catch (err) {
+                // 捕获 CORS 跨域画布污染 (CORS Tainted Canvas) 报错，静默降级回退原图
+                resolve(null);
+            }
+        };
+
+        tempImg.onerror = () => {
+            clearTimeout(timer);
+            resolve(null);
+        };
+    });
+}
+
+// ============================================================
 // 跨标签页提取逻辑 (包含超时竞争防护与防卡死熔断)
 // ============================================================
 async function extractImages() {
     showLoader();
+
+    // 释放上一批创建的所有离屏 Canvas 缩略图 Blob 显存资源
+    cleanupThumbnailBlobs();
 
     state.images = [];
     state.filteredImages = [];
@@ -724,22 +862,52 @@ async function extractImages() {
     }
 }
 
+/**
+ * 网页 DOM 节点图片提取脚本
+ * 
+ * 职责说明：
+ * 运行在目标标签页上下文中的 DOM 提取函数，负责：
+ * 1. 扫描页面中所有 <img> 元素，智能解析并分离原图 URL (src) 与缩略图 URL (thumbSrc)；
+ * 2. 扫描元素的 CSS background-image 背景图地址；
+ * 3. 扫描 <picture>/srcset 响应式资源；
+ * 4. 过滤追踪像素与极小位图图标。
+ * 
+ * @returns {Array<Object>} 提取出的图片元数据数组 { src, thumbSrc, width, height }
+ */
 function extractImagesFromPage() {
     const images = [];
     const seenSrcs = new Set();
 
     document.querySelectorAll('img').forEach(img => {
-        const src = img.src || img.dataset.src || img.dataset.lazySrc;
-        if (src && !seenSrcs.has(src) && isValidImage(img, src)) {
-            seenSrcs.add(src);
+        const dataset = img.dataset || {};
+        
+        // 尝试捕获原图高清链接（如 data-original / data-full-src / data-high-res / data-zoom-image 等）
+        const rawHighRes = dataset.original || dataset.fullSrc || dataset.highRes || dataset.zoomImage || dataset.src || dataset.lazySrc;
+        const currentImgSrc = img.src || '';
+
+        // 确定高清原图地址 (src)
+        const originalSrc = rawHighRes || currentImgSrc;
+
+        // 确定低清预览缩略图地址 (thumbSrc)：若存在高清原图 data 属性且与 currentImgSrc 不同，则 currentImgSrc 即为缩略图
+        let thumbSrc = null;
+        if (rawHighRes && currentImgSrc && rawHighRes !== currentImgSrc) {
+            thumbSrc = currentImgSrc;
+        } else if (dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes) {
+            thumbSrc = dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes;
+        }
+
+        if (originalSrc && !seenSrcs.has(originalSrc) && isValidImage(img, originalSrc)) {
+            seenSrcs.add(originalSrc);
             images.push({
-                src: src,
-                width: img.naturalWidth || img.width,
-                height: img.naturalHeight || img.height
+                src: originalSrc,
+                thumbSrc: thumbSrc || (originalSrc !== currentImgSrc ? currentImgSrc : null),
+                width: img.naturalWidth || img.width || 0,
+                height: img.naturalHeight || img.height || 0
             });
         }
     });
 
+    // 提取 CSS 背景图
     document.querySelectorAll('*').forEach(el => {
         const style = window.getComputedStyle(el);
         const bgImage = style.backgroundImage;
@@ -749,13 +917,15 @@ function extractImagesFromPage() {
                 seenSrcs.add(urlMatch[1]);
                 images.push({
                     src: urlMatch[1],
-                    width: el.offsetWidth,
-                    height: el.offsetHeight
+                    thumbSrc: null,
+                    width: el.offsetWidth || 0,
+                    height: el.offsetHeight || 0
                 });
             }
         }
     });
 
+    // 提取 picture source 响应式图片
     document.querySelectorAll('picture source').forEach(source => {
         const srcset = source.srcset;
         if (srcset) {
@@ -763,12 +933,18 @@ function extractImagesFromPage() {
             srcs.forEach(src => {
                 if (src && !seenSrcs.has(src)) {
                     seenSrcs.add(src);
-                    images.push({ src, width: 0, height: 0 });
+                    images.push({ src, thumbSrc: null, width: 0, height: 0 });
                 }
             });
         }
     });
 
+    /**
+     * 校验提取的图片资源是否合法有效
+     * @param {HTMLImageElement} img DOM 节点
+     * @param {string} src 图片地址
+     * @returns {boolean}
+     */
     function isValidImage(img, src) {
         const width = img.naturalWidth || img.width || 0;
         const height = img.naturalHeight || img.height || 0;
@@ -862,35 +1038,41 @@ function createImageCard(image, index) {
     }
 
     const img = document.createElement('img');
-    img.src = image.src;
     img.alt = `Image ${index + 1}`;
     img.loading = 'lazy';
+    img.decoding = 'async'; // 设置图像异步解码，避免阻塞主线程 UI 渲染
+
+    // 确定瀑布流卡片显示的预览图 URL（优先低清缩略图以节省显存开销，原图 image.src 仍完整保留供下载）
+    if (image.thumbSrc && image.thumbSrc !== image.src) {
+        // 优先 1：使用网页原生捕获到的 DOM 缩略图地址
+        img.src = image.thumbSrc;
+    } else if (image._cachedBlobUrl) {
+        // 优先 2：使用已生成的 Canvas 降采样缩略图 Blob URL
+        img.src = image._cachedBlobUrl;
+    } else {
+        // 优先 3：暂用原图 URL 兜底展示，针对高分辨率大图触发离屏 Canvas 降采样压缩
+        img.src = image.src;
+
+        const maxDim = Math.max(image.width || 0, image.height || 0);
+        // 对于分辨率 >= 1000px 的高清大图或尺寸未知的图，异步生成最大宽度 400px 的 WebP 缩略图
+        if (maxDim >= 1000 || !image.width) {
+            generateThumbnailBlobUrl(image.src, image, 400, 0.65).then(blobUrl => {
+                if (blobUrl) {
+                    image._cachedBlobUrl = blobUrl;
+                    img.src = blobUrl; // 替换卡片为极小体量的 Blob 缩略图
+                    
+                    // 缩略图替换后触发卡片底部的 4K/2K 徽章与真实原图分辨率二次刷新
+                    updateCardResolutionAndBadges();
+                }
+            }).catch(() => {});
+        }
+    }
 
     // 格式 Badge 与 4K/2K/FHD 画质徽章
     const format = getImageFormatFromUrl(image.src);
     const formatBadge = document.createElement('div');
     formatBadge.className = `format-badge ${format.toLowerCase()}`;
     formatBadge.textContent = format;
-
-    // 计算图片分辨率尺寸与像素量，用于识别高画质徽章 (4K / 2K / FHD)
-    const maxDimension = Math.max(image.width || 0, image.height || 0);
-    const pixelCount = (image.width || 0) * (image.height || 0);
-
-    // 针对大图保留 is-large 标识类（可在样式中做高亮扩展，CSS 中取消强制 span 2 跨列以确保列数排布准确）
-    if ((image.width >= 2400 || pixelCount >= 3800000) && (image.width >= image.height)) {
-        card.classList.add('is-large');
-    }
-
-    if (maxDimension >= 3840 || pixelCount >= 8000000) {
-        formatBadge.classList.add('badge-4k');
-        formatBadge.textContent = '4K UHD';
-    } else if (maxDimension >= 2560 || pixelCount >= 3600000) {
-        formatBadge.classList.add('badge-2k');
-        formatBadge.textContent = '2K QHD';
-    } else if (maxDimension >= 1920 || pixelCount >= 2000000) {
-        formatBadge.classList.add('badge-fhd');
-        formatBadge.textContent = 'FHD 1080P';
-    }
 
     // 勾选指示器 Badge (注入 SVG 对勾图标)
     const checkIndicator = document.createElement('div');
@@ -951,31 +1133,48 @@ function createImageCard(image, index) {
     cardInfoBar.appendChild(resolutionTag);
     cardInfoBar.appendChild(sourceTag);
 
+    /**
+     * 专门负责根据真实原图尺寸 (image.width 与 image.height) 动态更新底部分辨率标签与高画质徽章
+     * 绝对避免低清缩略图的节点尺寸污染 4K / 2K 徽章判定。
+     */
+    function updateCardResolutionAndBadges() {
+        if (image.width && image.height) {
+            resolutionTag.textContent = `${image.width} × ${image.height}`;
+            updateResolutionTagClass(resolutionTag, image.width, image.height);
+
+            const maxD = Math.max(image.width, image.height);
+            const pixels = image.width * image.height;
+            if ((image.width >= 2400 || pixels >= 3800000) && (image.width >= image.height)) {
+                card.classList.add('is-large');
+            }
+
+            // 重置与刷新画质徽章
+            formatBadge.classList.remove('badge-4k', 'badge-2k', 'badge-fhd');
+            if (maxD >= 3840 || pixels >= 8000000) {
+                formatBadge.classList.add('badge-4k');
+                formatBadge.textContent = '4K UHD';
+            } else if (maxD >= 2560 || pixels >= 3600000) {
+                formatBadge.classList.add('badge-2k');
+                formatBadge.textContent = '2K QHD';
+            } else if (maxD >= 1920 || pixels >= 2000000) {
+                formatBadge.classList.add('badge-fhd');
+                formatBadge.textContent = 'FHD 1080P';
+            } else {
+                formatBadge.textContent = format;
+            }
+        } else {
+            resolutionTag.textContent = '...';
+        }
+    }
+
     img.onload = () => {
-        if (!image.width || !image.height) {
+        // 只有当当前的 img.src 确为原图 URL 且元素尚未记录尺寸时，才允许用 img.naturalWidth 补充原图尺寸；
+        // 严禁使用缩略图 (thumbSrc 或 blobUrl) 节点尺寸覆盖原图宽高
+        if ((!image.width || !image.height) && img.src === image.src) {
             image.width = img.naturalWidth;
             image.height = img.naturalHeight;
         }
-        resolutionTag.textContent = `${image.width} × ${image.height}`;
-        updateResolutionTagClass(resolutionTag, image.width, image.height);
-
-        // 二次检测大图 Bento 跨列与徽章状态
-        const maxD = Math.max(image.width, image.height);
-        const pixels = image.width * image.height;
-        if ((image.width >= 2400 || pixels >= 3800000) && (image.width >= image.height)) {
-            card.classList.add('is-large');
-        }
-
-        if (maxD >= 3840 || pixels >= 8000000) {
-            formatBadge.classList.add('badge-4k');
-            formatBadge.textContent = '4K UHD';
-        } else if (maxD >= 2560 || pixels >= 3600000) {
-            formatBadge.classList.add('badge-2k');
-            formatBadge.textContent = '2K QHD';
-        } else if (maxD >= 1920 || pixels >= 2000000) {
-            formatBadge.classList.add('badge-fhd');
-            formatBadge.textContent = 'FHD 1080P';
-        }
+        updateCardResolutionAndBadges();
     };
 
     img.onerror = () => {
