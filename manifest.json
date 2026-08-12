@@ -9,7 +9,8 @@
     "downloads",
     "scripting",
     "storage",
-    "alarms"
+    "alarms",
+    "clipboardRead"
   ],
   "host_permissions": [
     "<all_urls>"

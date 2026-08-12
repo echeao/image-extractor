@@ -486,3 +486,171 @@ input:checked+.slider:before {
   transform: translateX(16px);
   background-color: white;
 }
+
+/* ========== 剪切板智能拆分 Popover 浮层样式 ========== */
+.smart-paste-popover {
+  position: absolute;
+  z-index: 10000;
+  width: 310px;
+  padding: 12px 14px;
+  background: rgba(20, 20, 35, 0.96);
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 20px rgba(99, 102, 241, 0.25);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  color: #ffffff;
+  font-size: 12px;
+  box-sizing: border-box;
+  animation: smartPopIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes smartPopIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.smart-paste-popover.hidden {
+  display: none !important;
+}
+
+.popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.popover-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #818cf8;
+  font-size: 13px;
+}
+
+.popover-close-btn {
+  background: transparent;
+  border: none;
+  color: #a0a0b0;
+  font-size: 16px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.popover-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.clipboard-preview {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: #cbd5e1;
+  font-family: monospace;
+  word-break: break-all;
+  margin-bottom: 10px;
+  max-height: 48px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+
+.smart-parse-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.parse-pair-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.parse-tag-label {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.parse-tag-value {
+  font-weight: 600;
+  color: #38bdf8;
+  word-break: break-all;
+  text-align: right;
+  max-width: 180px;
+}
+
+.smart-tags-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.smart-chip-tag {
+  background: rgba(99, 102, 241, 0.2);
+  color: #c7d2fe;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+.smart-chip-tag:hover {
+  background: #6366f1;
+  color: #fff;
+}
+
+.popover-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.btn-popover-action {
+  padding: 5px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.btn-popover-primary {
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  color: white;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
+}
+.btn-popover-primary:hover {
+  opacity: 0.95;
+  transform: translateY(-1px);
+}
+
+.btn-popover-sub {
+  background: rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+}
+.btn-popover-sub:hover {
+  background: rgba(255, 255, 255, 0.2);
+}

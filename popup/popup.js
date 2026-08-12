@@ -11,7 +11,8 @@ const state = {
   isAllSelected: false,    // 是否全选
   minResolution: 1000,     // 默认最小分辨率 1000px
   isRenaming: false,       // 是否开启重命名
-  renamePrefix: ''         // 重命名前缀
+  renamePrefix: '',        // 重命名前缀
+  downloadFolder: 'images' // 默认存储文件夹
 };
 
 // ========== DOM 元素 ==========
@@ -27,6 +28,7 @@ const elements = {
   downloadBtn: document.getElementById('downloadBtn'),
   renameToggle: document.getElementById('renameToggle'),
   renamePrefix: document.getElementById('renamePrefix'),
+  downloadFolder: document.getElementById('downloadFolder'),
   autoCloseTabsToggle: document.getElementById('autoCloseTabsToggle')
 };
 
@@ -44,7 +46,8 @@ async function saveSettings() {
       ...currentSettings,
       isRenaming: state.isRenaming,
       renamePrefix: state.renamePrefix,
-      autoCloseTabs: state.autoCloseTabs
+      autoCloseTabs: state.autoCloseTabs,
+      downloadFolder: state.downloadFolder
     };
     await chrome.storage.local.set({ [STORAGE_KEY]: updatedSettings });
   } catch (error) {
@@ -76,6 +79,7 @@ async function loadSettings() {
 function applySettingsToUI() {
   if (elements.renameToggle) elements.renameToggle.checked = state.isRenaming;
   if (elements.autoCloseTabsToggle) elements.autoCloseTabsToggle.checked = state.autoCloseTabs;
+  if (elements.downloadFolder) elements.downloadFolder.value = state.downloadFolder;
   if (elements.renamePrefix) {
     elements.renamePrefix.value = state.renamePrefix;
     elements.renamePrefix.disabled = !state.isRenaming;
@@ -112,12 +116,44 @@ async function init() {
       saveSettings();
     });
   }
+  if (elements.downloadFolder) {
+    elements.downloadFolder.addEventListener('input', (e) => {
+      const sanitized = sanitizeFilenamePart(e.target.value);
+      state.downloadFolder = sanitized || 'images';
+      saveSettings();
+    });
+  }
   if (elements.renamePrefix) {
     elements.renamePrefix.addEventListener('input', (e) => {
       const sanitized = sanitizeFilenamePart(e.target.value);
       e.target.value = sanitized;
       state.renamePrefix = sanitized;
       saveSettings(); // 即时保存前缀设置
+    });
+  }
+
+  // 实例化剪切板智能拆分与重命名助手
+  if (window.ClipboardSmartPaste) {
+    new window.ClipboardSmartPaste({
+      folderInput: elements.downloadFolder,
+      prefixInput: elements.renamePrefix,
+      renameToggle: elements.renameToggle,
+      onApply: (data) => {
+        if (typeof data.folder === 'string') {
+          state.downloadFolder = sanitizeFilenamePart(data.folder) || 'images';
+          if (elements.downloadFolder) elements.downloadFolder.value = state.downloadFolder;
+        }
+        if (typeof data.prefix === 'string') {
+          state.renamePrefix = sanitizeFilenamePart(data.prefix);
+          if (elements.renamePrefix) elements.renamePrefix.value = state.renamePrefix;
+        }
+        if (typeof data.isRenaming === 'boolean') {
+          state.isRenaming = data.isRenaming;
+          if (elements.renameToggle) elements.renameToggle.checked = state.isRenaming;
+          if (elements.renamePrefix) elements.renamePrefix.disabled = !state.isRenaming;
+        }
+        saveSettings();
+      }
     });
   }
 

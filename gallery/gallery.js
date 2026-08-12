@@ -306,6 +306,31 @@ async function init() {
         });
     }
 
+    // 实例化剪切板智能拆分与重命名助手
+    if (window.ClipboardSmartPaste) {
+        new window.ClipboardSmartPaste({
+            folderInput: elements.downloadFolder,
+            prefixInput: elements.renamePrefix,
+            renameToggle: elements.renameToggle,
+            onApply: (data) => {
+                if (typeof data.folder === 'string') {
+                    state.downloadFolder = sanitizeFolderInput(data.folder) || 'images';
+                    if (elements.downloadFolder) elements.downloadFolder.value = state.downloadFolder;
+                }
+                if (typeof data.prefix === 'string') {
+                    state.renamePrefix = sanitizeFilenamePart(data.prefix);
+                    if (elements.renamePrefix) elements.renamePrefix.value = state.renamePrefix;
+                }
+                if (typeof data.isRenaming === 'boolean') {
+                    state.isRenaming = data.isRenaming;
+                    if (elements.renameToggle) elements.renameToggle.checked = state.isRenaming;
+                    if (elements.renamePrefix) elements.renamePrefix.disabled = !state.isRenaming;
+                }
+                saveSettings();
+            }
+        });
+    }
+
     // 诊断日志控制
     if (elements.toggleLogBtn) {
         elements.toggleLogBtn.addEventListener('click', () => {

@@ -68,10 +68,12 @@
       <span class="filter-stats" id="filterStats"></span>
     </div>
 
-    <!-- 批量重命名栏 -->
+    <!-- 存储目录与批量重命名栏 -->
     <div class="rename-bar">
-      <span class="rename-label">批量重命名</span>
+      <span class="rename-label">存储与重命名</span>
       <div class="rename-controls">
+        <input type="text" id="downloadFolder" placeholder="存储目录 (images)" value="images" class="rename-input folder-input"
+          aria-label="存储文件夹" title="指定下载保存的子文件夹">
         <label class="switch" title="开启/关闭批量重命名">
           <input type="checkbox" id="renameToggle" aria-label="开启批量重命名">
           <span class="slider round"></span>
@@ -114,6 +116,7 @@
     <div class="masonry" id="masonry"></div>
   </div>
 
+  <script src="../scripts/clipboard-smart-paste.js"></script>
   <script src="popup.js"></script>
 </body>
 
