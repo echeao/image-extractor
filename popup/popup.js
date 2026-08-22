@@ -7,7 +7,7 @@
 const state = {
   images: [],              // 所有提取的图片（原始数据）
   filteredImages: [],      // 过滤后的图片
-  selectedImages: new Set(), // 已选中的图片索引（基于 filteredImages）
+  selectedImages: new Set(), // 已选中的图片 URL (src) 集合（Set 结构去重解耦）
   isAllSelected: false,    // 是否全选
   minResolution: 1000,     // 默认最小分辨率 1000px
   isRenaming: false,       // 是否开启重命名
@@ -169,6 +169,9 @@ async function init() {
     }
   });
 
+  // 监听标签页关闭事件，当标签页被后台自动关闭或用户手动关闭时实时平滑清理对应图片
+  chrome.tabs.onRemoved.addListener(handleTabRemoved);
+
   // 加载已保存设置并渲染到 UI
   await loadSettings();
   applySettingsToUI();
@@ -273,16 +276,17 @@ async function extractImages() {
 
     flatImages.forEach(img => {
       if (!urlMap.has(img.src)) {
-        const initialTabIds = new Set();
-        if (img.tabId) initialTabIds.add(img.tabId);
+        const initialTabIds = typeof img.tabId === 'number' ? [img.tabId] : [];
         urlMap.set(img.src, {
           ...img,
           tabIds: initialTabIds
         });
       } else {
         const existing = urlMap.get(img.src);
-        if (img.tabId && existing.tabIds) {
-          existing.tabIds.add(img.tabId);
+        if (typeof img.tabId === 'number' && Array.isArray(existing.tabIds)) {
+          if (!existing.tabIds.includes(img.tabId)) {
+            existing.tabIds.push(img.tabId);
+          }
         }
       }
     });
@@ -381,8 +385,9 @@ function createImageCard(image, index) {
   const card = document.createElement('div');
   card.className = 'image-card';
   card.dataset.index = index;
+  card.dataset.src = image.src;
 
-  if (state.selectedImages.has(index)) {
+  if (state.selectedImages.has(image.src)) {
     card.classList.add('selected');
   }
 
@@ -428,7 +433,7 @@ function createImageCard(image, index) {
   card.appendChild(resolutionTag);
   card.appendChild(sourceTag);
 
-  card.addEventListener('click', () => toggleImageSelection(card, index));
+  card.addEventListener('click', () => toggleImageSelection(card, image));
 
   return card;
 }
@@ -444,12 +449,13 @@ function updateResolutionTagClass(tag, width, height) {
 }
 
 // ========== 选择与下载逻辑 ==========
-function toggleImageSelection(card, index) {
-  if (state.selectedImages.has(index)) {
-    state.selectedImages.delete(index);
+function toggleImageSelection(card, image) {
+  if (!image || !image.src) return;
+  if (state.selectedImages.has(image.src)) {
+    state.selectedImages.delete(image.src);
     card.classList.remove('selected');
   } else {
-    state.selectedImages.add(index);
+    state.selectedImages.add(image.src);
     card.classList.add('selected');
   }
 
@@ -464,16 +470,19 @@ function toggleSelectAll() {
   if (state.isAllSelected) {
     state.selectedImages.clear();
     cards.forEach(card => card.classList.remove('selected'));
+    state.isAllSelected = false;
   } else {
-    cards.forEach((card, index) => {
+    state.filteredImages.forEach(img => {
+      if (img && img.src) state.selectedImages.add(img.src);
+    });
+    cards.forEach(card => {
       if (card.style.display !== 'none') {
-        state.selectedImages.add(index);
         card.classList.add('selected');
       }
     });
+    state.isAllSelected = true;
   }
 
-  state.isAllSelected = !state.isAllSelected;
   updateSelectAllButton();
   updateDownloadButton();
   updateStats();
@@ -510,16 +519,15 @@ function updateDownloadButton() {
 
 // ========== 核心批量下载功能 ==========
 async function downloadSelected() {
-  if (state.selectedImages.size === 0) return;
+  const selectedImageList = state.filteredImages.filter(img => state.selectedImages.has(img.src));
+  if (selectedImageList.length === 0) return;
 
-  const selectedIndices = Array.from(state.selectedImages);
-  const total = selectedIndices.length;
+  const total = selectedImageList.length;
   const padding = total.toString().length;
   const folder = state.downloadFolder || 'images';
 
   for (let i = 0; i < total; i++) {
-    const index = selectedIndices[i];
-    const image = state.filteredImages[index];
+    const image = selectedImageList[i];
     const url = image.src;
     let filename = null;
 
@@ -553,8 +561,7 @@ async function downloadSelected() {
       if (!response?.success) {
         throw new Error(response?.error || '下载失败');
       }
-      // 自动关页统一由后台 Service Worker 在下载落盘完成后执行：
-      // popup 失去焦点即被销毁，不能承担长时轮询任务，否则关页逻辑会被中断
+      // 自动关页统一由后台 Service Worker 在下载落盘完成后执行
     } catch (error) {
       console.error('下载失败:', url, error);
     }
@@ -567,6 +574,69 @@ async function downloadSelected() {
   updateSelectAllButton();
   updateDownloadButton();
   updateStats();
+}
+
+// ========== 标签页关闭监听与同步清理 ==========
+
+/**
+ * 标签页关闭事件响应入口
+ * @param {number} tabId 被关闭的标签页 ID
+ */
+function handleTabRemoved(tabId) {
+  removeImagesByTabId(tabId);
+}
+
+/**
+ * 根据被关闭的 tabId 清洗内存中的图片列表与 DOM 卡片
+ * @param {number} tabId 被关闭的标签页 ID
+ */
+function removeImagesByTabId(tabId) {
+  if (typeof tabId !== 'number') return;
+
+  const removedSrcs = new Set();
+
+  state.images = state.images.filter(img => {
+    if (Array.isArray(img.tabIds)) {
+      const idx = img.tabIds.indexOf(tabId);
+      if (idx !== -1) {
+        img.tabIds.splice(idx, 1);
+      }
+    }
+    if (img.tabId === tabId) {
+      img.tabId = (Array.isArray(img.tabIds) && img.tabIds.length > 0) ? img.tabIds[0] : null;
+    }
+
+    const isStillValid = (Array.isArray(img.tabIds) && img.tabIds.length > 0) || (img.tabId !== null && img.tabId !== undefined && img.tabId !== tabId);
+    if (!isStillValid) {
+      removedSrcs.add(img.src);
+      return false;
+    }
+    return true;
+  });
+
+  if (removedSrcs.size === 0) return;
+
+  state.filteredImages = state.filteredImages.filter(img => !removedSrcs.has(img.src));
+  removedSrcs.forEach(src => state.selectedImages.delete(src));
+
+  const cardsToExit = [];
+  document.querySelectorAll('.image-card').forEach(card => {
+    if (removedSrcs.has(card.dataset.src)) {
+      card.classList.add('card-exiting');
+      cardsToExit.push(card);
+    }
+  });
+
+  setTimeout(() => {
+    cardsToExit.forEach(card => card.remove());
+    if (state.filteredImages.length === 0) {
+      showEmptyState();
+    }
+    updateStats();
+    updateFilterStats();
+    updateSelectAllButton();
+    updateDownloadButton();
+  }, 250);
 }
 
 function toggleRename(e) {

@@ -876,6 +876,14 @@ body.canvas-checkerboard {
     box-shadow: var(--shadow-glow);
 }
 
+/* 卡片平滑退场动效 (自动关页/标签页关闭时平滑销毁) */
+.image-card.card-exiting {
+    opacity: 0 !important;
+    transform: scale(0.85) translateY(-8px) !important;
+    pointer-events: none !important;
+    transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1), transform 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
 .image-card img {
     display: block;
     width: 100%;

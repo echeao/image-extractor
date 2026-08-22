@@ -22,7 +22,7 @@ const state = {
     // ---------- 图片数据 ----------
     images: [],              // 从所有标签页提取的原始图片数组
     filteredImages: [],      // 经过组合筛选后的图片数组
-    selectedImages: new Set(), // 用户选中的图片索引集合（Set 结构去重）
+    selectedImages: new Set(), // 用户选中的图片 URL (src) 集合（Set 结构去重解耦）
 
     // ---------- 选择状态 ----------
     isAllSelected: false,    // 是否已全选所有可见图片
@@ -405,6 +405,9 @@ async function init() {
             if (elements.downloadFolder) elements.downloadFolder.value = next.downloadFolder;
         }
     });
+
+    // 监听标签页关闭事件，当标签页被后台自动关闭或用户手动关闭时实时平滑清理对应图片
+    chrome.tabs.onRemoved.addListener(handleTabRemoved);
 
     // 加载配置并提取图片
     await loadSettings();
@@ -1057,8 +1060,9 @@ function createImageCard(image, index) {
     const card = document.createElement('div');
     card.className = 'image-card';
     card.dataset.index = index;
+    card.dataset.src = image.src;
 
-    if (state.selectedImages.has(index)) {
+    if (state.selectedImages.has(image.src)) {
         card.classList.add('selected');
     }
 
@@ -1220,7 +1224,7 @@ function createImageCard(image, index) {
     card.appendChild(cardInfoBar);
 
     // 点击事件绑定（支持普通点击与 Shift 键连续范围选取）
-    card.addEventListener('click', (e) => handleImageClick(card, index, e));
+    card.addEventListener('click', (e) => handleImageClick(card, image, index, e));
 
     return card;
 }
@@ -1242,21 +1246,24 @@ function updateResolutionTagClass(tag, width, height) {
 /**
  * 处理卡片点击逻辑（支持按住 Shift 键跨范围批量多选）
  * @param {HTMLDivElement} card 卡片 DOM
+ * @param {Object} image 图片元数据对象
  * @param {number} index 卡片当前索引
  * @param {MouseEvent} event 鼠标点击事件
  */
-function handleImageClick(card, index, event) {
+function handleImageClick(card, image, index, event) {
     if (event && event.shiftKey && state.lastSelectedIndex !== null && state.lastSelectedIndex !== index) {
         const start = Math.min(state.lastSelectedIndex, index);
         const end = Math.max(state.lastSelectedIndex, index);
 
         for (let i = start; i <= end; i++) {
-            state.selectedImages.add(i);
+            const currentImg = state.filteredImages[i];
+            if (currentImg && currentImg.src) {
+                state.selectedImages.add(currentImg.src);
+            }
         }
 
         document.querySelectorAll('.image-card').forEach(c => {
-            const idx = parseInt(c.dataset.index, 10);
-            if (state.selectedImages.has(idx)) {
+            if (state.selectedImages.has(c.dataset.src)) {
                 c.classList.add('selected');
             }
         });
@@ -1265,17 +1272,23 @@ function handleImageClick(card, index, event) {
         updateSelectAllButton();
         updateDownloadButton();
     } else {
-        toggleImageSelection(card, index);
+        toggleImageSelection(card, image);
     }
     state.lastSelectedIndex = index;
 }
 
-function toggleImageSelection(card, index) {
-    if (state.selectedImages.has(index)) {
-        state.selectedImages.delete(index);
+/**
+ * 单击切换单张图片的选中状态
+ * @param {HTMLDivElement} card 卡片 DOM
+ * @param {Object} image 图片元数据对象
+ */
+function toggleImageSelection(card, image) {
+    if (!image || !image.src) return;
+    if (state.selectedImages.has(image.src)) {
+        state.selectedImages.delete(image.src);
         card.classList.remove('selected');
     } else {
-        state.selectedImages.add(index);
+        state.selectedImages.add(image.src);
         card.classList.add('selected');
     }
     updateStats();
@@ -1283,13 +1296,18 @@ function toggleImageSelection(card, index) {
     updateDownloadButton();
 }
 
+/**
+ * 一键全选/取消全选所有已过滤显示的图片
+ */
 function toggleSelectAll() {
     if (state.isAllSelected) {
         state.selectedImages.clear();
         document.querySelectorAll('.image-card').forEach(card => card.classList.remove('selected'));
         state.isAllSelected = false;
     } else {
-        state.filteredImages.forEach((_, index) => state.selectedImages.add(index));
+        state.filteredImages.forEach(img => {
+            if (img && img.src) state.selectedImages.add(img.src);
+        });
         document.querySelectorAll('.image-card').forEach(card => card.classList.add('selected'));
         state.isAllSelected = true;
     }
@@ -1302,17 +1320,17 @@ function toggleSelectAll() {
  * 反向选择图片（反选）
  */
 function invertSelection() {
-    state.filteredImages.forEach((_, index) => {
-        if (state.selectedImages.has(index)) {
-            state.selectedImages.delete(index);
+    state.filteredImages.forEach(img => {
+        if (!img || !img.src) return;
+        if (state.selectedImages.has(img.src)) {
+            state.selectedImages.delete(img.src);
         } else {
-            state.selectedImages.add(index);
+            state.selectedImages.add(img.src);
         }
     });
 
     document.querySelectorAll('.image-card').forEach(card => {
-        const idx = parseInt(card.dataset.index, 10);
-        if (state.selectedImages.has(idx)) {
+        if (state.selectedImages.has(card.dataset.src)) {
             card.classList.add('selected');
         } else {
             card.classList.remove('selected');
@@ -1452,8 +1470,8 @@ async function downloadSingleImage(image) {
 // 核心下载执行 & 自动关闭已下载标签页 & 诊断
 // ============================================================
 async function downloadSelected() {
-    const selectedIndices = Array.from(state.selectedImages);
-    if (selectedIndices.length === 0) return;
+    const selectedImageList = state.filteredImages.filter(img => state.selectedImages.has(img.src));
+    if (selectedImageList.length === 0) return;
 
     if (elements.downloadBtn) {
         elements.downloadBtn.disabled = true;
@@ -1466,11 +1484,10 @@ async function downloadSelected() {
     let failCount = 0;
     const successfulTabIds = new Set(); // 搜集下载成功的关联 tabId 集合
 
-    showDiagnostics(`开始批量下载 ${selectedIndices.length} 张图片到文件夹: ${folder}`);
+    showDiagnostics(`开始批量下载 ${selectedImageList.length} 张图片到文件夹: ${folder}`);
 
-    for (let i = 0; i < selectedIndices.length; i++) {
-        const index = selectedIndices[i];
-        const image = state.filteredImages[index];
+    for (let i = 0; i < selectedImageList.length; i++) {
+        const image = selectedImageList[i];
         let filename = null;
 
         if (state.isRenaming && state.renamePrefix) {
@@ -1492,14 +1509,14 @@ async function downloadSelected() {
             if (response && response.success) {
                 successCount++;
                 extractTabIdsFromImg(image).forEach(id => successfulTabIds.add(id));
-                appendDiagnosticsLog(`[${i + 1}/${selectedIndices.length}] 下载成功 ID: ${response.downloadId} (${filename || '原始文件名'})`);
+                appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 下载成功 ID: ${response.downloadId} (${filename || '原始文件名'})`);
             } else {
                 failCount++;
-                appendDiagnosticsLog(`[${i + 1}/${selectedIndices.length}] 下载失败: ${response?.error || '未知错误'}`);
+                appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 下载失败: ${response?.error || '未知错误'}`);
             }
         } catch (error) {
             failCount++;
-            appendDiagnosticsLog(`[${i + 1}/${selectedIndices.length}] 消息通信错误: ${error.message}`);
+            appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 消息通信错误: ${error.message}`);
         }
 
         await new Promise(r => setTimeout(r, 120));
@@ -1534,6 +1551,101 @@ async function downloadSelected() {
             }
         }, 5000);
     }
+}
+
+// ============================================================
+// 标签页关闭事件监听 & 瀑布流卡片平滑退场
+// ============================================================
+
+/**
+ * 标签页关闭事件处理函数入口
+ * @param {number} tabId 被关闭的标签页 ID
+ */
+function handleTabRemoved(tabId) {
+    removeImagesByTabId(tabId);
+}
+
+/**
+ * 当浏览器标签页关闭时 (无论是后台自动关闭还是用户手动关闭)，
+ * 响应式清理画廊中与该标签页关联的图片，并执行平滑退场动画。
+ *
+ * @param {number} tabId 被关闭的标签页 ID
+ */
+function removeImagesByTabId(tabId) {
+    if (typeof tabId !== 'number') return;
+
+    const removedSrcs = new Set();
+
+    // 1. 遍历并清洗全局图片数组中的 tabId 关联记录
+    state.images = state.images.filter(img => {
+        let hasThisTab = false;
+        if (Array.isArray(img.tabIds)) {
+            const idx = img.tabIds.indexOf(tabId);
+            if (idx !== -1) {
+                img.tabIds.splice(idx, 1);
+                hasThisTab = true;
+            }
+        }
+        if (img.tabId === tabId) {
+            img.tabId = (Array.isArray(img.tabIds) && img.tabIds.length > 0) ? img.tabIds[0] : null;
+            hasThisTab = true;
+        }
+
+        // 如果该图片已经没有关联的活跃标签页，标记为待移除
+        const isStillValid = (Array.isArray(img.tabIds) && img.tabIds.length > 0) || (img.tabId !== null && img.tabId !== undefined && img.tabId !== tabId);
+        if (!isStillValid) {
+            removedSrcs.add(img.src);
+            // 释放离屏 Canvas 生成的 Blob 缩略图显存
+            if (img._cachedBlobUrl) {
+                try {
+                    URL.revokeObjectURL(img._cachedBlobUrl);
+                    createdBlobUrls.delete(img._cachedBlobUrl);
+                } catch (e) {}
+            }
+            return false;
+        }
+        return true;
+    });
+
+    if (removedSrcs.size === 0) return;
+
+    // 2. 从当前筛选集合及选中集合中剔除
+    state.filteredImages = state.filteredImages.filter(img => !removedSrcs.has(img.src));
+    removedSrcs.forEach(src => state.selectedImages.delete(src));
+
+    // 3. 定位 DOM 中需要退场的卡片，附加平滑退场动画类
+    const cardsToExit = [];
+    document.querySelectorAll('.image-card').forEach(card => {
+        if (removedSrcs.has(card.dataset.src)) {
+            card.classList.add('card-exiting');
+            cardsToExit.push(card);
+        }
+    });
+
+    // 4. 等待 CSS 动画执行完毕后物理从 DOM 移除
+    setTimeout(() => {
+        cardsToExit.forEach(card => card.remove());
+
+        // 清理由于卡片被移除而变成空的分区块 (如 landscape-section / portrait-section)
+        document.querySelectorAll('.masonry-section').forEach(section => {
+            if (section.querySelectorAll('.image-card').length === 0) {
+                section.remove();
+            }
+        });
+
+        // 若当前所有可见图片均已被清理完毕，平滑切换回 Empty State
+        if (state.filteredImages.length === 0) {
+            showEmptyState();
+        }
+
+        // 刷新所有统计与按钮状态
+        updateStats();
+        updateFilterStats();
+        updateSelectAllButton();
+        updateDownloadButton();
+    }, 250);
+
+    appendDiagnosticsLog(`[标签页联动] 标签页 ${tabId} 已关闭，已从画廊中平滑移除 ${removedSrcs.size} 张关联图片。`);
 }
 
 // ============================================================
