@@ -543,47 +543,120 @@ function resetAllFilters() {
 }
 
 /**
+ * 校验单张图片是否满足当前的综合筛选规则（分辨率/自定义尺寸、格式、比例）
+ * 
+ * @param {Object} img 图片元数据对象
+ * @returns {boolean} 是否符合当前生效的筛选规则
+ */
+function isImagePassingCurrentFilter(img) {
+    const width = img.width || 0;
+    const height = img.height || 0;
+
+    // 1. 分辨率尺寸校验
+    let sizeMatch = false;
+    if (state.customMinWidth > 0 || state.customMinHeight > 0) {
+        sizeMatch = width >= state.customMinWidth && height >= state.customMinHeight;
+    } else {
+        const maxDim = Math.max(width, height);
+        sizeMatch = maxDim >= state.minResolution;
+    }
+    if (!sizeMatch) return false;
+
+    // 2. 文件格式校验（支持 WEBP/WEBPG 等标准与动态参数格式）
+    if (state.selectedFormat !== 'all') {
+        const format = getImageFormatFromUrl(img.src).toUpperCase();
+        const targetFormat = state.selectedFormat.toUpperCase();
+        if (targetFormat === 'JPG') {
+            if (format !== 'JPG' && format !== 'JPEG') return false;
+        } else if (targetFormat === 'WEBP') {
+            if (format !== 'WEBP' && format !== 'WEBPG') return false;
+        } else if (format !== targetFormat) {
+            return false;
+        }
+    }
+
+    // 3. 图像宽高比例校验
+    if (state.selectedRatio !== 'all' && width > 0 && height > 0) {
+        const ratio = width / height;
+        if (state.selectedRatio === 'landscape' && ratio <= 1.1) return false; // 横图
+        if (state.selectedRatio === 'portrait' && ratio >= 0.9) return false;  // 竖图
+        if (state.selectedRatio === 'square' && (ratio < 0.9 || ratio > 1.1)) return false; // 方形
+    }
+
+    return true;
+}
+
+// 防抖重新筛选定时器，避免大量图片在短时间内频繁重绘瀑布流
+let debouncedFilterTimer = null;
+function scheduleDebouncedApplyFilter() {
+    if (debouncedFilterTimer) clearTimeout(debouncedFilterTimer);
+    debouncedFilterTimer = setTimeout(() => {
+        applyFilter();
+    }, 120);
+}
+
+/**
+ * 当图片真实物理分辨率被异步解码/探测解析完成后的回调处理
+ * 
+ * 职责说明：
+ * 1. 更新 image 元数据对象的真实物理宽高；
+ * 2. 检查当前图片是否依然符合当前的综合筛选规则；
+ * 3. 若不符合（例如原先被误判为大图、实际只有 200x200 的小 WebP 图），将其平滑移除出 filteredImages 及 DOM 列表；
+ * 4. 若符合（例如原尺寸为 0 但实际是高清大图），触发调度加入展示；
+ * 5. 实时更新筛选统计栏与全选按钮状态。
+ * 
+ * @param {Object} image 单张图片数据对象
+ * @param {number} realWidth 真实自然宽度 (px)
+ * @param {number} realHeight 真实自然高度 (px)
+ * @param {HTMLElement} [cardElement=null] 对应的卡片 DOM 元素（若已渲染）
+ */
+function handleImageDimensionResolved(image, realWidth, realHeight, cardElement = null) {
+    if (!image || !realWidth || !realHeight) return;
+    if (image.width === realWidth && image.height === realHeight) return;
+
+    image.width = realWidth;
+    image.height = realHeight;
+
+    const matchesFilter = isImagePassingCurrentFilter(image);
+    const inFilteredIndex = state.filteredImages.findIndex(item => item.src === image.src);
+
+    if (!matchesFilter && inFilteredIndex !== -1) {
+        // 该图片真实尺寸不满足当前筛选条件，从 filteredImages 中移除
+        state.filteredImages.splice(inFilteredIndex, 1);
+        if (state.selectedImages.has(image.src)) {
+            state.selectedImages.delete(image.src);
+            updateDownloadButton();
+        }
+
+        // 从 DOM 中平滑移除对应卡片
+        if (cardElement && cardElement.parentNode) {
+            cardElement.remove();
+        } else {
+            const card = document.querySelector(`.image-card[data-src="${CSS.escape(image.src)}"]`);
+            if (card) card.remove();
+        }
+
+        updateFilterStats();
+        updateStats();
+        updateSelectAllButton();
+
+        if (state.filteredImages.length === 0) {
+            showEmptyState();
+        }
+    } else if (matchesFilter && inFilteredIndex === -1) {
+        // 该图片原本尺寸为 0 被初次筛选过滤，但探测出真实尺寸符合大图条件，加入列表并重新渲染
+        scheduleDebouncedApplyFilter();
+    }
+}
+
+/**
  * 联合应用分辨率、自定义尺寸、文件格式与比例综合筛选
  */
 function applyFilter() {
     state.selectedImages.clear();
     state.lastSelectedIndex = null;
 
-    state.filteredImages = state.images.filter(img => {
-        const width = img.width || 0;
-        const height = img.height || 0;
-
-        // 1. 分辨率尺寸校验
-        let sizeMatch = false;
-        if (state.customMinWidth > 0 || state.customMinHeight > 0) {
-            sizeMatch = width >= state.customMinWidth && height >= state.customMinHeight;
-        } else {
-            const maxDim = Math.max(width, height);
-            sizeMatch = maxDim >= state.minResolution;
-        }
-        if (!sizeMatch) return false;
-
-        // 2. 文件格式校验
-        if (state.selectedFormat !== 'all') {
-            const format = getImageFormatFromUrl(img.src).toUpperCase();
-            const targetFormat = state.selectedFormat.toUpperCase();
-            if (targetFormat === 'JPG') {
-                if (format !== 'JPG' && format !== 'JPEG') return false;
-            } else if (format !== targetFormat) {
-                return false;
-            }
-        }
-
-        // 3. 图像宽高比例校验
-        if (state.selectedRatio !== 'all' && width > 0 && height > 0) {
-            const ratio = width / height;
-            if (state.selectedRatio === 'landscape' && ratio <= 1.1) return false; // 横图
-            if (state.selectedRatio === 'portrait' && ratio >= 0.9) return false;  // 竖图
-            if (state.selectedRatio === 'square' && (ratio < 0.9 || ratio > 1.1)) return false; // 方形
-        }
-
-        return true;
-    });
+    state.filteredImages = state.images.filter(img => isImagePassingCurrentFilter(img));
 
     // 4. 瀑布流图片横竖屏分组优化编排（宽屏图片集中在最前，竖屏图片集中在后）
     state.filteredImages = sortImagesByAspectRatio(state.filteredImages);
@@ -726,12 +799,9 @@ async function generateThumbnailBlobUrl(imageSrc, imageObj = null, maxDimension 
                 const originWidth = tempImg.naturalWidth || tempImg.width;
                 const originHeight = tempImg.naturalHeight || tempImg.height;
 
-                // 若原图像在提取时未拿到准确尺寸，利用加载成功的原图 Image 对象第一时间更新真实元数据，防止后续被缩略图尺寸篡改
+                // 若原图像在提取时未拿到准确尺寸，利用加载成功的原图 Image 对象第一时间更新真实元数据并触发动态筛选
                 if (imageObj && originWidth && originHeight) {
-                    if (!imageObj.width || !imageObj.height) {
-                        imageObj.width = originWidth;
-                        imageObj.height = originHeight;
-                    }
+                    handleImageDimensionResolved(imageObj, originWidth, originHeight);
                 }
 
                 // 若原图尺寸小于等于目标缩略图边长，无需重复绘制 Canvas 压缩
@@ -883,11 +953,45 @@ async function extractImages() {
             showEmptyState();
         } else {
             applyFilter();
+            // 启动异步真实物理尺寸探测，自动补齐 WebP / 背景图等真实物理尺寸并动态重筛
+            probeImageDimensions(state.images);
         }
     } catch (error) {
         console.error('提取图片出错:', error);
         showEmptyState();
     }
+}
+
+/**
+ * 针对所有初始宽度或高度为 0 的图片（如 CSS 背景图、<picture source> 中的 WebP 等）进行异步轻量尺寸探测
+ * 
+ * 职责说明：
+ * 在不阻塞主画廊初始渲染的前提下，后台并发探测真实物理尺寸，
+ * 探测完成后自动调用 handleImageDimensionResolved 触发动态过滤与卡片尺寸更新。
+ * 
+ * @param {Array<Object>} images 待探测的图片元数据数组
+ */
+function probeImageDimensions(images) {
+    if (!Array.isArray(images) || images.length === 0) return;
+    const zeroDimImages = images.filter(img => !img.width || !img.height);
+
+    zeroDimImages.forEach(image => {
+        if (!image.src || image.src.startsWith('data:image/svg')) return;
+        const probeImg = new Image();
+        probeImg.src = image.src;
+
+        probeImg.onload = () => {
+            const w = probeImg.naturalWidth || 0;
+            const h = probeImg.naturalHeight || 0;
+            if (w > 0 && h > 0) {
+                handleImageDimensionResolved(image, w, h);
+            }
+        };
+
+        probeImg.onerror = () => {
+            // 静默忽略加载失败的图片探测
+        };
+    });
 }
 
 /**
@@ -924,18 +1028,22 @@ function extractImagesFromPage() {
             thumbSrc = dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes;
         }
 
+        // 严格获取物理固有分辨率 naturalWidth，绝不使用 img.width 布局渲染宽度，防止 CSS 拉伸导致尺寸虚高
+        const naturalW = img.naturalWidth || 0;
+        const naturalH = img.naturalHeight || 0;
+
         if (originalSrc && !seenSrcs.has(originalSrc) && isValidImage(img, originalSrc)) {
             seenSrcs.add(originalSrc);
             images.push({
                 src: originalSrc,
                 thumbSrc: thumbSrc || (originalSrc !== currentImgSrc ? currentImgSrc : null),
-                width: img.naturalWidth || img.width || 0,
-                height: img.naturalHeight || img.height || 0
+                width: naturalW,
+                height: naturalH
             });
         }
     });
 
-    // 提取 CSS 背景图
+    // 提取 CSS 背景图（初始宽高设为 0，严禁使用外部容器 offsetWidth/offsetHeight 污染图片物理尺寸）
     document.querySelectorAll('*').forEach(el => {
         const style = window.getComputedStyle(el);
         const bgImage = style.backgroundImage;
@@ -946,14 +1054,14 @@ function extractImagesFromPage() {
                 images.push({
                     src: urlMatch[1],
                     thumbSrc: null,
-                    width: el.offsetWidth || 0,
-                    height: el.offsetHeight || 0
+                    width: 0,
+                    height: 0
                 });
             }
         }
     });
 
-    // 提取 picture source 响应式图片
+    // 提取 picture source 响应式图片（初始宽高设为 0，交由尺寸探测池异步解析）
     document.querySelectorAll('picture source').forEach(source => {
         const srcset = source.srcset;
         if (srcset) {
@@ -974,8 +1082,8 @@ function extractImagesFromPage() {
      * @returns {boolean}
      */
     function isValidImage(img, src) {
-        const width = img.naturalWidth || img.width || 0;
-        const height = img.naturalHeight || img.height || 0;
+        const width = img.naturalWidth || 0;
+        const height = img.naturalHeight || 0;
         if (width > 0 && width < 30 && height > 0 && height < 30) return false;
         if (src.startsWith('data:') && src.length < 1000) return false;
         if (src.includes('pixel') || src.includes('tracking') || src.includes('spacer')) return false;
@@ -1197,11 +1305,10 @@ function createImageCard(image, index) {
     }
 
     img.onload = () => {
-        // 只有当当前的 img.src 确为原图 URL 且元素尚未记录尺寸时，才允许用 img.naturalWidth 补充原图尺寸；
+        // 只有当当前的 img.src 确为原图 URL 且能够读取固有物理分辨率时，才允许补充原图尺寸；
         // 严禁使用缩略图 (thumbSrc 或 blobUrl) 节点尺寸覆盖原图宽高
-        if ((!image.width || !image.height) && img.src === image.src) {
-            image.width = img.naturalWidth;
-            image.height = img.naturalHeight;
+        if (img.src === image.src && img.naturalWidth && img.naturalHeight) {
+            handleImageDimensionResolved(image, img.naturalWidth, img.naturalHeight, card);
         }
         updateCardResolutionAndBadges();
     };
@@ -1719,29 +1826,79 @@ function applyCanvasBg(bgType) {
     }
 }
 
+/**
+ * 从图片 URL 中智能提取图片格式标识（大写，如 PNG / JPG / WEBP / GIF / SVG / AVIF / BMP / ICO）
+ * 
+ * 增强识别能力：
+ * 1. Data URL (data:image/xxx;base64,...)
+ * 2. 现代 CDN 动态参数 (如 ?format=webp, ?wx_fmt=webp, ?wx_fmt=webpg, ?x-oss-process=image/format,webp, ?f=webp)
+ * 3. 别名与特殊扩展名兼容 (如 .webpg -> WEBP, .jpeg -> JPG)
+ * 4. 路径清理与标准扩展名截取
+ * 
+ * @param {string} url 图片 URL 字符串
+ * @returns {string} 规范化的大写格式名称（若无法识别返回 'IMG'）
+ */
 function getImageFormatFromUrl(url) {
     if (!url) return 'IMG';
+
+    // 1. Data URL 格式识别
     if (url.startsWith('data:image/')) {
         const mimeMatch = url.match(/data:image\/([a-zA-Z0-9+-]+);/);
         if (mimeMatch && mimeMatch[1]) {
-            return mimeMatch[1].toUpperCase();
+            const rawMime = mimeMatch[1].toUpperCase();
+            if (rawMime === 'JPEG') return 'JPG';
+            if (rawMime === 'SVG+XML') return 'SVG';
+            if (rawMime === 'WEBPG') return 'WEBP';
+            return rawMime;
         }
     }
+
     try {
+        const lowerUrl = url.toLowerCase();
+
+        // 2. 针对带 Query 参数的动态 CDN 格式参数优先探测 (例如微信公众号 wx_fmt, 阿里云 OSS, Unsplash 等)
+        const cdnFormatMatch = lowerUrl.match(/(?:[?&](?:wx_fmt|format|fmt|f)=|format[,\/])([a-zA-Z0-9]+)/);
+        if (cdnFormatMatch && cdnFormatMatch[1]) {
+            const cdnFmt = cdnFormatMatch[1].toUpperCase();
+            if (['PNG', 'JPG', 'JPEG', 'WEBP', 'WEBPG', 'GIF', 'SVG', 'BMP', 'AVIF', 'ICO'].includes(cdnFmt)) {
+                if (cdnFmt === 'JPEG') return 'JPG';
+                if (cdnFmt === 'WEBPG') return 'WEBP';
+                return cdnFmt;
+            }
+        }
+
+        // 3. 基于标准 URL 路径后缀解析
         const cleanUrl = url.split('?')[0].split('#')[0];
         const ext = cleanUrl.split('.').pop().toUpperCase();
-        if (['PNG', 'JPG', 'JPEG', 'WEBP', 'GIF', 'SVG', 'BMP', 'AVIF', 'ICO'].includes(ext)) {
-            return ext === 'JPEG' ? 'JPG' : ext;
+        if (['PNG', 'JPG', 'JPEG', 'WEBP', 'WEBPG', 'GIF', 'SVG', 'BMP', 'AVIF', 'ICO'].includes(ext)) {
+            if (ext === 'JPEG') return 'JPG';
+            if (ext === 'WEBPG') return 'WEBP';
+            return ext;
         }
     } catch (e) {}
+
     return 'IMG';
 }
 
+/**
+ * 从 URL 中提取标准扩展名（含点号，小写，如 .jpg, .webp, .png）
+ * @param {string} url 图片 URL
+ * @returns {string} 小写扩展名，若无法获取则根据已知格式回退或返回空
+ */
 function getExtensionFromUrl(url) {
     try {
+        const fmt = getImageFormatFromUrl(url);
+        if (fmt && fmt !== 'IMG') {
+            return '.' + fmt.toLowerCase();
+        }
         const urlObj = new URL(url);
         const parts = urlObj.pathname.split('.');
-        if (parts.length > 1) return '.' + parts.pop().toLowerCase();
+        if (parts.length > 1) {
+            const ext = parts.pop().toLowerCase();
+            if (ext === 'jpeg') return '.jpg';
+            if (ext === 'webpg') return '.webp';
+            return '.' + ext;
+        }
     } catch (e) {}
     return '';
 }

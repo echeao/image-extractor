@@ -438,8 +438,8 @@ function getFilenameFromUrl(url) {
  * @returns {boolean} 如果有图片扩展名返回 true
  */
 function hasImageExtension(filename) {
-    // 支持的图片格式列表
-    const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico'];
+    // 支持的图片格式列表（包含 webpg / avif 等扩展名）
+    const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.webpg', '.svg', '.bmp', '.ico', '.avif'];
     const lowerFilename = filename.toLowerCase();
 
     // 检查文件名是否以任一图片扩展名结尾
@@ -447,22 +447,42 @@ function hasImageExtension(filename) {
 }
 
 /**
- * 从 URL 路径中提取扩展名
+ * 从 URL 路径及查询参数中提取标准扩展名
  * 
  * 例如: https://example.com/image.png -> .png
+ * 例如: https://example.com/pic?wx_fmt=webp -> .webp
+ * 例如: https://example.com/pic.webpg -> .webp
  * 
  * @param {string} url - 图片 URL
  * @returns {string} 扩展名（包含点号）或空字符串
  */
 function getExtensionFromUrl(url) {
     try {
+        const lowerUrl = url.toLowerCase();
+
+        // 1. 探测动态 CDN 参数 (如 wx_fmt=webp, format=webp 等)
+        const cdnFormatMatch = lowerUrl.match(/(?:[?&](?:wx_fmt|format|fmt|f)=|format[,\/])([a-zA-Z0-9]+)/);
+        if (cdnFormatMatch && cdnFormatMatch[1]) {
+            const fmt = cdnFormatMatch[1].toLowerCase();
+            if (['png', 'jpg', 'jpeg', 'webp', 'webpg', 'gif', 'svg', 'bmp', 'avif', 'ico'].includes(fmt)) {
+                if (fmt === 'jpeg') return '.jpg';
+                if (fmt === 'webpg') return '.webp';
+                return '.' + fmt;
+            }
+        }
+
+        // 2. 探测标准 pathname 后缀
         const urlObj = new URL(url);
         const pathname = urlObj.pathname;
         const parts = pathname.split('.');
 
-        // 如果路径中有点号，最后一部分就是扩展名
         if (parts.length > 1) {
-            return '.' + parts.pop().toLowerCase();
+            const ext = parts.pop().toLowerCase();
+            if (['png', 'jpg', 'jpeg', 'webp', 'webpg', 'gif', 'svg', 'bmp', 'avif', 'ico'].includes(ext)) {
+                if (ext === 'jpeg') return '.jpg';
+                if (ext === 'webpg') return '.webp';
+                return '.' + ext;
+            }
         }
     } catch (e) {
         // URL 解析失败，忽略

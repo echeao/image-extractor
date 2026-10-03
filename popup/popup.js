@@ -192,13 +192,76 @@ function setMinResolution(minRes, activeBtn) {
   applyFilter();
 }
 
+/**
+ * 校验单张图片是否满足当前的分辨率筛选规则
+ * @param {Object} img 图片元数据
+ * @returns {boolean}
+ */
+function isImagePassingCurrentFilter(img) {
+  if (state.minResolution === 0) return true;
+  const maxDim = Math.max(img.width || 0, img.height || 0);
+  return maxDim >= state.minResolution;
+}
+
+// 防抖重新筛选定时器
+let debouncedFilterTimer = null;
+function scheduleDebouncedApplyFilter() {
+  if (debouncedFilterTimer) clearTimeout(debouncedFilterTimer);
+  debouncedFilterTimer = setTimeout(() => {
+    applyFilter();
+  }, 120);
+}
+
+/**
+ * 当图片真实物理分辨率被异步解码/探测解析完成后的回调处理
+ * 
+ * @param {Object} image 单张图片数据对象
+ * @param {number} realWidth 真实自然宽度 (px)
+ * @param {number} realHeight 真实自然高度 (px)
+ * @param {HTMLElement} [cardElement=null] 对应的卡片 DOM 元素（若已渲染）
+ */
+function handleImageDimensionResolved(image, realWidth, realHeight, cardElement = null) {
+  if (!image || !realWidth || !realHeight) return;
+  if (image.width === realWidth && image.height === realHeight) return;
+
+  image.width = realWidth;
+  image.height = realHeight;
+
+  const matchesFilter = isImagePassingCurrentFilter(image);
+  const inFilteredIndex = state.filteredImages.findIndex(item => item.src === image.src);
+
+  if (!matchesFilter && inFilteredIndex !== -1) {
+    // 真实尺寸不满足当前筛选条件（如实测只有 200x200 的 WebP 图），从列表中剔除
+    state.filteredImages.splice(inFilteredIndex, 1);
+    if (state.selectedImages.has(image.src)) {
+      state.selectedImages.delete(image.src);
+      updateDownloadButton();
+    }
+
+    if (cardElement && cardElement.parentNode) {
+      cardElement.remove();
+    } else {
+      const card = document.querySelector(`.image-card[data-src="${CSS.escape(image.src)}"]`);
+      if (card) card.remove();
+    }
+
+    updateFilterStats();
+    updateStats();
+    updateSelectAllButton();
+
+    if (state.filteredImages.length === 0) {
+      showEmptyState();
+    }
+  } else if (matchesFilter && inFilteredIndex === -1) {
+    // 探测出真实尺寸符合大图条件，加入列表并重新渲染
+    scheduleDebouncedApplyFilter();
+  }
+}
+
 function applyFilter() {
   state.selectedImages.clear();
 
-  state.filteredImages = state.images.filter(img => {
-    const maxDim = Math.max(img.width || 0, img.height || 0);
-    return maxDim >= state.minResolution;
-  });
+  state.filteredImages = state.images.filter(img => isImagePassingCurrentFilter(img));
 
   updateFilterStats();
 
@@ -297,11 +360,38 @@ async function extractImages() {
       showEmptyState();
     } else {
       applyFilter();
+      // 启动轻量尺寸探测池
+      probeImageDimensions(state.images);
     }
   } catch (error) {
     console.error('提取图片时出错:', error);
     showEmptyState();
   }
+}
+
+/**
+ * 针对所有初始宽度或高度为 0 的图片进行异步轻量尺寸探测
+ * @param {Array<Object>} images
+ */
+function probeImageDimensions(images) {
+  if (!Array.isArray(images) || images.length === 0) return;
+  const zeroDimImages = images.filter(img => !img.width || !img.height);
+
+  zeroDimImages.forEach(image => {
+    if (!image.src || image.src.startsWith('data:image/svg')) return;
+    const probeImg = new Image();
+    probeImg.src = image.src;
+
+    probeImg.onload = () => {
+      const w = probeImg.naturalWidth || 0;
+      const h = probeImg.naturalHeight || 0;
+      if (w > 0 && h > 0) {
+        handleImageDimensionResolved(image, w, h);
+      }
+    };
+
+    probeImg.onerror = () => {};
+  });
 }
 
 /**
@@ -312,17 +402,25 @@ function extractImagesFromPage() {
   const seenSrcs = new Set();
 
   document.querySelectorAll('img').forEach(img => {
-    const src = img.src || img.dataset.src || img.dataset.lazySrc;
-    if (src && !seenSrcs.has(src) && isValidImage(img, src)) {
-      seenSrcs.add(src);
+    const dataset = img.dataset || {};
+    const rawHighRes = dataset.original || dataset.fullSrc || dataset.highRes || dataset.zoomImage || dataset.src || dataset.lazySrc;
+    const currentImgSrc = img.src || '';
+    const originalSrc = rawHighRes || currentImgSrc;
+
+    const naturalW = img.naturalWidth || 0;
+    const naturalH = img.naturalHeight || 0;
+
+    if (originalSrc && !seenSrcs.has(originalSrc) && isValidImage(img, originalSrc)) {
+      seenSrcs.add(originalSrc);
       images.push({
-        src: src,
-        width: img.naturalWidth || img.width,
-        height: img.naturalHeight || img.height
+        src: originalSrc,
+        width: naturalW,
+        height: naturalH
       });
     }
   });
 
+  // 提取 CSS 背景图（初始尺寸置 0，严禁使用 offsetWidth/offsetHeight 容器尺寸）
   document.querySelectorAll('*').forEach(el => {
     const style = window.getComputedStyle(el);
     const bgImage = style.backgroundImage;
@@ -332,13 +430,14 @@ function extractImagesFromPage() {
         seenSrcs.add(urlMatch[1]);
         images.push({
           src: urlMatch[1],
-          width: el.offsetWidth,
-          height: el.offsetHeight
+          width: 0,
+          height: 0
         });
       }
     }
   });
 
+  // 提取 picture source 响应式图片
   document.querySelectorAll('picture source').forEach(source => {
     const srcset = source.srcset;
     if (srcset) {
@@ -353,8 +452,8 @@ function extractImagesFromPage() {
   });
 
   function isValidImage(img, src) {
-    const width = img.naturalWidth || img.width || 0;
-    const height = img.naturalHeight || img.height || 0;
+    const width = img.naturalWidth || 0;
+    const height = img.naturalHeight || 0;
     if (width > 0 && width < 30 && height > 0 && height < 30) return false;
     if (src.startsWith('data:') && src.length < 1000) return false;
     if (src.includes('pixel') || src.includes('tracking') || src.includes('spacer')) return false;
@@ -400,9 +499,8 @@ function createImageCard(image, index) {
   resolutionTag.className = 'resolution-tag';
 
   img.onload = () => {
-    if (!image.width || !image.height) {
-      image.width = img.naturalWidth;
-      image.height = img.naturalHeight;
+    if (img.src === image.src && img.naturalWidth && img.naturalHeight) {
+      handleImageDimensionResolved(image, img.naturalWidth, img.naturalHeight, card);
     }
     resolutionTag.textContent = `${image.width} × ${image.height}`;
     updateResolutionTagClass(resolutionTag, image.width, image.height);
@@ -517,6 +615,71 @@ function updateDownloadButton() {
   `;
 }
 
+/**
+ * 从图片 URL 中智能提取图片格式标识
+ * @param {string} url
+ * @returns {string}
+ */
+function getImageFormatFromUrl(url) {
+  if (!url) return 'IMG';
+  if (url.startsWith('data:image/')) {
+    const mimeMatch = url.match(/data:image\/([a-zA-Z0-9+-]+);/);
+    if (mimeMatch && mimeMatch[1]) {
+      const rawMime = mimeMatch[1].toUpperCase();
+      if (rawMime === 'JPEG') return 'JPG';
+      if (rawMime === 'SVG+XML') return 'SVG';
+      if (rawMime === 'WEBPG') return 'WEBP';
+      return rawMime;
+    }
+  }
+
+  try {
+    const lowerUrl = url.toLowerCase();
+    const cdnFormatMatch = lowerUrl.match(/(?:[?&](?:wx_fmt|format|fmt|f)=|format[,\/])([a-zA-Z0-9]+)/);
+    if (cdnFormatMatch && cdnFormatMatch[1]) {
+      const cdnFmt = cdnFormatMatch[1].toUpperCase();
+      if (['PNG', 'JPG', 'JPEG', 'WEBP', 'WEBPG', 'GIF', 'SVG', 'BMP', 'AVIF', 'ICO'].includes(cdnFmt)) {
+        if (cdnFmt === 'JPEG') return 'JPG';
+        if (cdnFmt === 'WEBPG') return 'WEBP';
+        return cdnFmt;
+      }
+    }
+
+    const cleanUrl = url.split('?')[0].split('#')[0];
+    const ext = cleanUrl.split('.').pop().toUpperCase();
+    if (['PNG', 'JPG', 'JPEG', 'WEBP', 'WEBPG', 'GIF', 'SVG', 'BMP', 'AVIF', 'ICO'].includes(ext)) {
+      if (ext === 'JPEG') return 'JPG';
+      if (ext === 'WEBPG') return 'WEBP';
+      return ext;
+    }
+  } catch (e) {}
+
+  return 'IMG';
+}
+
+/**
+ * 从 URL 中提取标准扩展名（含点号，小写）
+ * @param {string} url
+ * @returns {string}
+ */
+function getExtensionFromUrl(url) {
+  try {
+    const fmt = getImageFormatFromUrl(url);
+    if (fmt && fmt !== 'IMG') {
+      return '.' + fmt.toLowerCase();
+    }
+    const urlObj = new URL(url);
+    const parts = urlObj.pathname.split('.');
+    if (parts.length > 1) {
+      const ext = parts.pop().toLowerCase();
+      if (ext === 'jpeg') return '.jpg';
+      if (ext === 'webpg') return '.webp';
+      return '.' + ext;
+    }
+  } catch (e) {}
+  return '';
+}
+
 // ========== 核心批量下载功能 ==========
 async function downloadSelected() {
   const selectedImageList = state.filteredImages.filter(img => state.selectedImages.has(img.src));
@@ -532,18 +695,7 @@ async function downloadSelected() {
     let filename = null;
 
     if (state.isRenaming && state.renamePrefix) {
-      let ext = '.jpg';
-      try {
-        const urlObj = new URL(url);
-        const parts = urlObj.pathname.split('.');
-        if (parts.length > 1) {
-          const potentialExt = '.' + parts.pop().toLowerCase();
-          if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico'].includes(potentialExt)) {
-            ext = potentialExt;
-          }
-        }
-      } catch (e) {}
-
+      const ext = getExtensionFromUrl(url) || '.jpg';
       const num = (i + 1).toString().padStart(padding, '0');
       filename = `${state.renamePrefix}_${num}${ext}`;
     }

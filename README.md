@@ -1,6 +1,6 @@
 <div align="center">
 
-# <img src="https://raw.githubusercontent.com/feathericons/feather/master/icons/image.svg" width="32" height="32" alt="Image icon" /> Image Extractor
+# <img src="icons/icon48.png" width="32" height="32" alt="Image Extractor icon" style="vertical-align: middle;" /> Image Extractor
 
 ### Chrome 图片提取器扩展
 
@@ -55,8 +55,10 @@ image-extractor/
 ├── MANIFEST_DOCS.js
 ├── icons/
 │   ├── icon16.png
+│   ├── icon32.png
 │   ├── icon48.png
-│   └── icon128.png
+│   ├── icon128.png
+│   └── icon512.png
 ├── popup/
 │   ├── popup.html
 │   ├── popup.css
