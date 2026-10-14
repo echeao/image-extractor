@@ -1716,6 +1716,20 @@ function extractTabIdsFromImg(img) {
 }
 
 /**
+ * 确定图片的单一归属目标标签页 ID (保证批量预登记与下载派发严格 1:1 绝对守恒)
+ * 优先取直接绑定的 tabId，若无则取关联数组的首项
+ * 
+ * @param {Object} img 图片元数据对象
+ * @returns {number|null} 规范化后的目标标签页 ID
+ */
+function getPrimaryTabId(img) {
+    if (!img) return null;
+    if (typeof img.tabId === 'number' && img.tabId > 0) return img.tabId;
+    const ids = extractTabIdsFromImg(img);
+    return ids.length > 0 ? ids[0] : null;
+}
+
+/**
  * 触发单张图片快速下载
  * @param {Object} image 单张图片元数据对象
  */
@@ -1725,13 +1739,14 @@ async function downloadSingleImage(image) {
     state.downloadFolder = folder;
     saveSettings();
 
+    const targetTabId = getPrimaryTabId(image);
     showDiagnostics(`正在下载单张图片到文件夹: ${folder}...`);
     try {
         const response = await chrome.runtime.sendMessage({
             action: 'download',
             url: image.src,
             folder: folder,
-            tabId: image.tabId,
+            tabId: targetTabId,
             autoClose: state.autoCloseTabs,
             isPreRegistered: false
         });
@@ -1742,12 +1757,9 @@ async function downloadSingleImage(image) {
             }
 
             // 若开启自动关页：关页统一由后台 Service Worker 在下载落盘完成后执行
-            if (state.autoCloseTabs) {
-                const tabIdsToClose = extractTabIdsFromImg(image);
-                if (tabIdsToClose.length > 0) {
-                    if (elements.downloadDiagnosticsLog) elements.downloadDiagnosticsLog.classList.remove('hidden');
-                    appendDiagnosticsLog(`[自动关页] 已为 ${tabIdsToClose.length} 个关联标签页登记关页追踪，落盘后将自动关闭。`);
-                }
+            if (state.autoCloseTabs && targetTabId) {
+                if (elements.downloadDiagnosticsLog) elements.downloadDiagnosticsLog.classList.remove('hidden');
+                appendDiagnosticsLog(`[自动关页] 已为来源标签页 (ID: ${targetTabId}) 登记关页追踪，落盘后将自动关闭。`);
             }
 
             setTimeout(() => {
@@ -1792,13 +1804,14 @@ async function downloadSelected() {
     showDiagnostics(`开始批量下载 ${selectedImageList.length} 张图片到文件夹: ${folder}`);
 
     // 若开启自动关页，循环前预先登记各个标签页的下载图片总数，防止首张图片快速落盘引发时序竞态提前误关网页
+    // 严格使用 getPrimaryTabId 建立归属，确保预登记总数与循环派发参数 1:1 精确守恒
     if (state.autoCloseTabs) {
         const tabCounts = new Map();
         selectedImageList.forEach(img => {
-            const tabIds = extractTabIdsFromImg(img);
-            tabIds.forEach(id => {
-                tabCounts.set(id, (tabCounts.get(id) || 0) + 1);
-            });
+            const tabId = getPrimaryTabId(img);
+            if (tabId) {
+                tabCounts.set(tabId, (tabCounts.get(tabId) || 0) + 1);
+            }
         });
 
         for (const [tabId, totalCount] of tabCounts.entries()) {
@@ -1824,20 +1837,22 @@ async function downloadSelected() {
             filename = `${renamePrefix}_${num}${ext}`;
         }
 
+        const targetTabId = getPrimaryTabId(image);
+
         try {
             const response = await chrome.runtime.sendMessage({
                 action: 'download',
                 url: image.src,
                 filename: filename,
                 folder: folder,
-                tabId: image.tabId,
+                tabId: targetTabId,
                 autoClose: state.autoCloseTabs,
                 isPreRegistered: state.autoCloseTabs
             });
 
             if (response && response.success) {
                 successCount++;
-                extractTabIdsFromImg(image).forEach(id => successfulTabIds.add(id));
+                if (targetTabId) successfulTabIds.add(targetTabId);
                 appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 下载落盘成功 ID: ${response.downloadId} (${filename || response.filename || '原始文件名'})`);
             } else {
                 failCount++;

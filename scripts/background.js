@@ -56,6 +56,8 @@ const SESSION_STATE_KEY = 'downloadTabTracker';
 let pendingDownloadTabs = new Map(); // downloadId -> { tabId: number, autoClose: boolean }
 // 记录每个 tabId 尚在排队/下载中的图片总任务数
 let tabPendingCounts = new Map();   // tabId -> number
+// 记录每个 tabId 是否有至少 1 张图片成功落盘（用于确保关页决策确定性）
+let tabSuccessFlags = new Map();    // tabId -> boolean
 
 /**
  * Service Worker 启动时从 chrome.storage.session 恢复追踪状态。
@@ -72,6 +74,9 @@ async function loadTrackerState() {
             );
             tabPendingCounts = new Map(
                 Object.entries(saved.tabPendingCounts || {}).map(([tabId, count]) => [Number(tabId), count])
+            );
+            tabSuccessFlags = new Map(
+                Object.entries(saved.tabSuccessFlags || {}).map(([tabId, flag]) => [Number(tabId), Boolean(flag)])
             );
         }
     } catch (error) {
@@ -153,7 +158,8 @@ function saveTrackerState() {
         chrome.storage.session.set({
             [SESSION_STATE_KEY]: {
                 pendingDownloadTabs: Object.fromEntries(pendingDownloadTabs),
-                tabPendingCounts: Object.fromEntries(tabPendingCounts)
+                tabPendingCounts: Object.fromEntries(tabPendingCounts),
+                tabSuccessFlags: Object.fromEntries(tabSuccessFlags)
             }
         }).catch(err => console.log('保存下载追踪状态失败:', err));
     } catch (err) {
@@ -193,10 +199,34 @@ function decrementTabCount(tabId) {
 }
 
 /**
- * 下载进入终态 (complete / interrupted) 后的统一处理入口（幂等）。
+ * 安全关闭指定的浏览器标签页（具备扩展自身画廊防误杀保护）
+ * 
+ * @param {number} tabId - 目标标签页 ID
+ */
+async function safelyCloseTab(tabId) {
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (!tab) return;
+        const tabUrl = tab.url || tab.pendingUrl || '';
+
+        // 核心安全红线：严格禁止关闭扩展自身的画廊页面 (gallery.html) 或内部页面
+        if (tabUrl.includes(chrome.runtime.id) || tabUrl.startsWith('chrome-extension://')) {
+            console.log(`[自动关页拦截] 标签页 ${tabId} 为扩展画廊或内部页面，已安全拦截跳过关闭`);
+            return;
+        }
+
+        await chrome.tabs.remove(tabId);
+        console.log(`[自动关页] 标签页 ${tabId} 已平滑安全关闭`);
+    } catch (err) {
+        console.log(`后台自动关闭标签页 (ID: ${tabId}) 异常:`, err);
+    }
+}
+
+/**
+ * 下载进入终态 (complete / interrupted) 后的统一处理入口（权威幂等）。
  *
- * 只有登记过追踪记录的下载才会被处理；处理前立即删除记录，
- * 保证 onChanged 事件与注册后的补偿查询即使同时到达也只生效一次。
+ * 只有登记过追踪记录的下载才会被处理；处理前立即从 pendingDownloadTabs 中删除记录，
+ * 保证全局 onChanged 事件与 executeImageDownload 内部的权威补偿即使同时到达也只生效一次。
  *
  * @param {number} downloadId - 下载 ID
  * @param {string} finalState - 终态：'complete' | 'interrupted'
@@ -205,10 +235,18 @@ function handleDownloadFinished(downloadId, finalState) {
     const info = pendingDownloadTabs.get(downloadId);
     if (!info) return; // 未登记或已处理过，直接跳过
 
+    // 关键：原子性立即从 Map 中移除，彻底阻断并发双重扣减
     deletePendingDownload(downloadId);
 
     const { tabId, autoClose } = info;
     if (!autoClose || !tabId) return;
+
+    // 记录该标签页是否存在至少 1 张成功落盘的图片
+    if (finalState === 'complete') {
+        tabSuccessFlags.set(tabId, true);
+        saveTrackerState();
+    }
+
     // 防御：计数记录不存在时不做任何递减/关页，避免误关仍有下载进行的标签页
     if (!tabPendingCounts.has(tabId)) {
         console.log(`[自动关页] 下载 ${downloadId} 终态 (${finalState})，但标签页 ${tabId} 无计数记录，跳过`);
@@ -216,15 +254,21 @@ function handleDownloadFinished(downloadId, finalState) {
     }
 
     const remaining = decrementTabCount(tabId);
-    console.log(`[自动关页] 下载 ${downloadId} 终态 (${finalState})，标签页 ${tabId} 剩余任务数: ${remaining}`);
-    // 仅当此 tabId 的所有下载任务全部结束且该图下载成功时，才关闭标签页
-    if (remaining <= 0 && finalState === 'complete') {
-        console.log(`[自动关页] 标签页 ${tabId} 所有下载已落盘完成，执行关闭`);
-        chrome.tabs.remove(tabId).then(() => {
-            console.log(`[自动关页] 标签页 ${tabId} 已成功关闭`);
-        }).catch(err => {
-            console.log(`后台自动关闭标签页 (ID: ${tabId}) 失败:`, err);
-        });
+    console.log(`[自动关页] 下载 ${downloadId} 终态 (${finalState})，标签页 ${tabId} 剩余待完成任务数: ${remaining}`);
+
+    // 确定性关页决策：仅当此 tabId 的所有下载任务全部出清 (remaining <= 0) 且该标签页至少有 1 张成功落盘时才关闭
+    if (remaining <= 0) {
+        const hasSuccess = tabSuccessFlags.get(tabId) || false;
+        // 清理该标签页的历史成功标记
+        tabSuccessFlags.delete(tabId);
+        saveTrackerState();
+
+        if (hasSuccess) {
+            console.log(`[自动关页] 标签页 ${tabId} 所有关联下载已全部完成且存在成功落盘，执行安全关闭`);
+            safelyCloseTab(tabId);
+        } else {
+            console.log(`[自动关页] 标签页 ${tabId} 所有关联下载均失败/中断，跳过关闭标签页`);
+        }
     }
 }
 
@@ -389,11 +433,19 @@ async function executeImageDownload(request) {
         if (!completion || !completion.success) {
             console.log(`[下载自愈] 原生下载确已中断 (${completion?.error || '创建失败'})，启动 Fetch 双轨通道: ${url}`);
             try {
-                // 清除失效的旧 downloadId 追踪与路径登记
+                // 清除失效的旧 downloadId 路径拦截
                 if (initialDownloadId) {
                     plannedDownloadPaths.delete(initialDownloadId);
-                    if (autoClose && tabId) {
+                }
+
+                // 核心计数守恒保障：
+                // 若 initialDownloadId 尚未被全局 onChanged 处理，直接清除它避免后续重复扣减；
+                // 若已被全局 onChanged 扣减（pending 记录已不存在），则在此补偿 +1，维持兜底任务的计数守恒
+                if (autoClose && tabId) {
+                    if (initialDownloadId && pendingDownloadTabs.has(initialDownloadId)) {
                         deletePendingDownload(initialDownloadId);
+                    } else if (initialDownloadId && !pendingDownloadTabs.has(initialDownloadId)) {
+                        incrementTabCount(tabId);
                     }
                 }
 
@@ -414,20 +466,28 @@ async function executeImageDownload(request) {
             }
         }
 
-        // 阶段 4：根据真实落盘结果回执前端
+        // 阶段 4：根据真实落盘结果回执前端与权威终态结算
         if (completion && completion.success) {
+            // 权威终态补偿：若因小图/缓存极速落盘导致全局 onChanged 错过了 pending 记录，此处权威执行终态结算
+            if (finalDownloadId && pendingDownloadTabs.has(finalDownloadId)) {
+                console.log(`[权威补偿结算] 检测到下载 ${finalDownloadId} 极速落盘未被捕获，执行结算`);
+                handleDownloadFinished(finalDownloadId, 'complete');
+            }
+
             return {
                 success: true,
                 downloadId: finalDownloadId,
                 filename: filename
             };
         } else {
-            // 下载最终失败，清理路径与计数
+            // 下载最终彻底失败（原生与兜底均未成功），执行失败结算与清理
             if (finalDownloadId) plannedDownloadPaths.delete(finalDownloadId);
-            if (autoClose && tabId) {
+            if (finalDownloadId && pendingDownloadTabs.has(finalDownloadId)) {
+                handleDownloadFinished(finalDownloadId, 'interrupted');
+            } else if (autoClose && tabId && !isPreRegistered && tabPendingCounts.has(tabId)) {
                 decrementTabCount(tabId);
-                if (finalDownloadId) deletePendingDownload(finalDownloadId);
             }
+
             return {
                 success: false,
                 downloadId: finalDownloadId,
@@ -436,10 +496,12 @@ async function executeImageDownload(request) {
         }
     } catch (unexpectedErr) {
         if (finalDownloadId) plannedDownloadPaths.delete(finalDownloadId);
-        if (autoClose && tabId) {
+        if (finalDownloadId && pendingDownloadTabs.has(finalDownloadId)) {
+            handleDownloadFinished(finalDownloadId, 'interrupted');
+        } else if (autoClose && tabId && !isPreRegistered && tabPendingCounts.has(tabId)) {
             decrementTabCount(tabId);
-            if (finalDownloadId) deletePendingDownload(finalDownloadId);
         }
+
         return {
             success: false,
             error: unexpectedErr.message
