@@ -44,6 +44,11 @@ const state = {
     downloadFolder: 'images', // 下载到的子文件夹名称
     autoCloseTabs: false,    // 下载完成后是否自动关闭对应标签页
 
+    // ---------- 提取范围模式 ----------
+    extractScope: 'current',   // 提取模式: 'current' (仅当前标签页) | 'all' (全部标签页)
+    sourceTabId: null,         // 来源目标标签页 ID (由 background 透传或自动识别)
+    sourceTabTitle: '',        // 来源目标标签页标题 (用于 UI 展示与悬浮提示)
+
     // ---------- 显示与主题设置 ----------
     columnCount: 5,           // 瀑布流列数（1-8）
     theme: 'light',           // 主题: 'light'（亮色） | 'dark'（深色）
@@ -68,6 +73,7 @@ async function saveSettings() {
         const current = result[STORAGE_KEY] || {};
         const settings = {
             ...current,
+            extractScope: state.extractScope,    // 保存提取范围模式偏好
             minResolution: state.minResolution,
             customMinWidth: state.customMinWidth,
             customMinHeight: state.customMinHeight,
@@ -97,6 +103,7 @@ async function loadSettings() {
         const result = await chrome.storage.local.get(STORAGE_KEY);
         const settings = result[STORAGE_KEY];
         if (settings) {
+            state.extractScope = settings.extractScope ?? 'current'; // 默认优先当前标签页
             state.minResolution = settings.minResolution ?? 1000;
             state.customMinWidth = settings.customMinWidth ?? 0;
             state.customMinHeight = settings.customMinHeight ?? 0;
@@ -112,6 +119,7 @@ async function loadSettings() {
             state.renamePrefix = settings.renamePrefix ?? '';    // 恢复重命名前缀文本
             console.log('设置已加载恢复:', settings);
         } else {
+            state.extractScope = 'current';
             state.theme = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
         }
     } catch (error) {
@@ -123,6 +131,9 @@ async function loadSettings() {
  * 将状态同步更新应用到 UI 视图
  */
 function applySettingsToUI() {
+    // 0. 提取范围模式 UI 同步
+    updateScopeUI();
+
     // 1. 列数
     updateColumnCount(state.columnCount);
 
@@ -176,9 +187,12 @@ const elements = {
     emptyState: document.getElementById('emptyState'),
     masonry: document.getElementById('masonry'),
 
-    // 统计文本
+    // 统计文本与提取范围控制
     stats: document.getElementById('stats'),
     filterStats: document.getElementById('filterStats'),
+    scopeModeGroup: document.getElementById('scopeModeGroup'),
+    scopeCurrentBtn: document.getElementById('scopeCurrentBtn'),
+    scopeAllBtn: document.getElementById('scopeAllBtn'),
 
     // 关键操作按钮
     refreshBtn: document.getElementById('refreshBtn'),
@@ -379,6 +393,17 @@ async function init() {
     if (elements.minWidth) elements.minWidth.addEventListener('keypress', (e) => { if (e.key === 'Enter') applyCustomResolution(); });
     if (elements.minHeight) elements.minHeight.addEventListener('keypress', (e) => { if (e.key === 'Enter') applyCustomResolution(); });
 
+    // 绑定提取范围模式切换按钮 (当前网页 vs 全部标签页)
+    if (elements.scopeCurrentBtn) {
+        elements.scopeCurrentBtn.addEventListener('click', () => setExtractScope('current'));
+    }
+    if (elements.scopeAllBtn) {
+        elements.scopeAllBtn.addEventListener('click', () => setExtractScope('all'));
+    }
+
+    // 解析 URL 参数中的来源标签页 ID (由 background.js 透传)
+    parseSourceTabIdFromUrl();
+
     // 跨上下文设置实时同步：popup 中切换自动关页/重命名等开关时，
     // 已打开的画廊页内存状态不会自动更新，导致下载时仍传旧值
     // (autoClose=false)。监听 storage 变更实时同步共享开关与 UI。
@@ -387,6 +412,10 @@ async function init() {
         const next = changes[STORAGE_KEY].newValue;
         if (!next) return;
 
+        if (typeof next.extractScope === 'string' && next.extractScope !== state.extractScope) {
+            state.extractScope = next.extractScope;
+            updateScopeUI();
+        }
         if (typeof next.autoCloseTabs === 'boolean' && next.autoCloseTabs !== state.autoCloseTabs) {
             state.autoCloseTabs = next.autoCloseTabs;
             if (elements.autoCloseTabsToggle) elements.autoCloseTabsToggle.checked = next.autoCloseTabs;
@@ -413,6 +442,70 @@ async function init() {
     await loadSettings();
     applySettingsToUI();
     await extractImages();
+}
+
+// ============================================================
+// 提取范围模式控制 (当前标签页 vs 全部标签页)
+// ============================================================
+/**
+ * 从页面 URL 查询参数中解析来源标签页 ID
+ */
+function parseSourceTabIdFromUrl() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const sourceTabId = params.get('sourceTabId');
+        if (sourceTabId) {
+            const parsed = parseInt(sourceTabId, 10);
+            if (!isNaN(parsed) && parsed > 0) {
+                state.sourceTabId = parsed;
+            }
+        }
+    } catch (e) {
+        console.error('解析来源标签页参数失败:', e);
+    }
+}
+
+/**
+ * 切换图片提取范围模式
+ * @param {'current' | 'all'} scope 目标提取模式
+ */
+async function setExtractScope(scope) {
+    if (state.extractScope === scope) return;
+    state.extractScope = scope;
+    updateScopeUI();
+    saveSettings();
+    await extractImages();
+}
+
+/**
+ * 更新提取范围切换按钮的 UI 激活态与无障碍属性
+ */
+function updateScopeUI() {
+    const isCurrent = state.extractScope === 'current';
+    if (elements.scopeCurrentBtn) {
+        elements.scopeCurrentBtn.classList.toggle('active', isCurrent);
+        elements.scopeCurrentBtn.setAttribute('aria-selected', isCurrent ? 'true' : 'false');
+        if (state.sourceTabTitle) {
+            elements.scopeCurrentBtn.title = `仅提取当前网页 (${state.sourceTabTitle})`;
+        } else {
+            elements.scopeCurrentBtn.title = '仅提取打开画廊前所在的当前网页图片';
+        }
+    }
+    if (elements.scopeAllBtn) {
+        elements.scopeAllBtn.classList.toggle('active', !isCurrent);
+        elements.scopeAllBtn.setAttribute('aria-selected', !isCurrent ? 'true' : 'false');
+    }
+}
+
+/**
+ * 文本截断辅助函数
+ * @param {string} str 原始字符串
+ * @param {number} maxLen 最大字符数
+ * @returns {string} 截断后的字符串
+ */
+function truncateString(str, maxLen = 14) {
+    if (!str || typeof str !== 'string') return '';
+    return str.length > maxLen ? str.slice(0, maxLen) + '...' : str;
 }
 
 // ============================================================
@@ -865,10 +958,15 @@ async function generateThumbnailBlobUrl(imageSrc, imageObj = null, maxDimension 
 }
 
 // ============================================================
-// 跨标签页提取逻辑 (包含超时竞争防护与防卡死熔断)
+// 图片提取核心逻辑 (支持「仅当前网页」与「全部标签页」模式)
 // ============================================================
 async function extractImages() {
     showLoader();
+
+    // 更新扫描状态文本
+    if (elements.stats) {
+        elements.stats.textContent = state.extractScope === 'current' ? '正在扫描当前网页...' : '正在扫描全部网页...';
+    }
 
     // 释放上一批创建的所有离屏 Canvas 缩略图 Blob 显存资源
     cleanupThumbnailBlobs();
@@ -881,8 +979,10 @@ async function extractImages() {
     updateDownloadButton();
 
     try {
-        const tabs = await chrome.tabs.query({});
-        const validTabs = tabs.filter(tab => {
+        let validTabs = [];
+
+        // 统一检测标签页 URL 是否允许注入 content script
+        const isInjectableTab = (tab) => {
             const pageUrl = tab.url || tab.pendingUrl || '';
             if (pageUrl) {
                 return !pageUrl.startsWith('chrome://') &&
@@ -891,7 +991,60 @@ async function extractImages() {
                        !pageUrl.startsWith('about:');
             }
             return true; // 即使 MV3 中非激活标签页 url 字段为 undefined，依然保留其 ID 进行提取与后续关页
-        });
+        };
+
+        // ========== 分支 1：仅当前标签页模式 ==========
+        if (state.extractScope === 'current') {
+            let targetTab = null;
+
+            // 优先 1：验证传入或保存的 sourceTabId 是否存活且可注入
+            if (typeof state.sourceTabId === 'number') {
+                try {
+                    const tab = await chrome.tabs.get(state.sourceTabId);
+                    if (tab && isInjectableTab(tab)) {
+                        targetTab = tab;
+                    }
+                } catch (e) {
+                    console.log('指定的来源标签页已关闭或不存在 (tabId):', state.sourceTabId);
+                }
+            }
+
+            // 优先 2：若无有效 sourceTabId，自动寻找当前窗口除画廊之外的最近一个有效标签页
+            if (!targetTab) {
+                try {
+                    const currentTab = await chrome.tabs.getCurrent();
+                    const currentTabId = currentTab ? currentTab.id : null;
+                    const tabsInWindow = await chrome.tabs.query({ currentWindow: true });
+                    const candidates = tabsInWindow.filter(t => t.id !== currentTabId && isInjectableTab(t));
+                    if (candidates.length > 0) {
+                        targetTab = candidates[candidates.length - 1];
+                        state.sourceTabId = targetTab.id;
+                    }
+                } catch (e) {
+                    console.log('自动探测备选标签页失败:', e);
+                }
+            }
+
+            if (targetTab) {
+                validTabs = [targetTab];
+                state.sourceTabTitle = targetTab.title || '当前网页';
+                updateScopeUI();
+            } else {
+                // 若实在无法获取单一来源标签页（例如独立全屏打开且无其他网页），优雅降级为全部模式
+                console.log('未检测到可用当前标签页，智能降级为全部标签页模式');
+                state.extractScope = 'all';
+                updateScopeUI();
+                const allTabs = await chrome.tabs.query({});
+                validTabs = allTabs.filter(isInjectableTab);
+                if (typeof showDiagnostics === 'function') {
+                    showDiagnostics('未检测到当前来源网页，已自动为您切换为“全部标签页”模式');
+                }
+            }
+        } else {
+            // ========== 分支 2：全部标签页模式 ==========
+            const allTabs = await chrome.tabs.query({});
+            validTabs = allTabs.filter(isInjectableTab);
+        }
 
         if (validTabs.length === 0) {
             showEmptyState();
@@ -1010,6 +1163,25 @@ function extractImagesFromPage() {
     const images = [];
     const seenSrcs = new Set();
 
+    /**
+     * 将任意相对路径、无协议 URL 转换为当前页面基准的绝对 HTTP/HTTPS URL
+     * 避免直接传给 chrome.downloads 时因路径相对或协议缺失被 Chrome 静默中断
+     * @param {string} rawUrl 原始 URL 字符串
+     * @returns {string} 规范化后的绝对 URL
+     */
+    function toAbsoluteUrl(rawUrl) {
+        if (!rawUrl || typeof rawUrl !== 'string') return '';
+        const trimmed = rawUrl.trim();
+        if (!trimmed || trimmed.startsWith('javascript:')) return '';
+        // Data URL 与 Blob URL 直接保留
+        if (trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return trimmed;
+        try {
+            return new URL(trimmed, document.baseURI).href;
+        } catch {
+            return trimmed;
+        }
+    }
+
     document.querySelectorAll('img').forEach(img => {
         const dataset = img.dataset || {};
         
@@ -1017,15 +1189,19 @@ function extractImagesFromPage() {
         const rawHighRes = dataset.original || dataset.fullSrc || dataset.highRes || dataset.zoomImage || dataset.src || dataset.lazySrc;
         const currentImgSrc = img.src || '';
 
+        // 统一规范化为绝对地址
+        const resolvedHighRes = rawHighRes ? toAbsoluteUrl(rawHighRes) : '';
+        const resolvedCurrentSrc = currentImgSrc ? toAbsoluteUrl(currentImgSrc) : '';
+
         // 确定高清原图地址 (src)
-        const originalSrc = rawHighRes || currentImgSrc;
+        const originalSrc = resolvedHighRes || resolvedCurrentSrc;
 
         // 确定低清预览缩略图地址 (thumbSrc)：若存在高清原图 data 属性且与 currentImgSrc 不同，则 currentImgSrc 即为缩略图
         let thumbSrc = null;
-        if (rawHighRes && currentImgSrc && rawHighRes !== currentImgSrc) {
-            thumbSrc = currentImgSrc;
+        if (resolvedHighRes && resolvedCurrentSrc && resolvedHighRes !== resolvedCurrentSrc) {
+            thumbSrc = resolvedCurrentSrc;
         } else if (dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes) {
-            thumbSrc = dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes;
+            thumbSrc = toAbsoluteUrl(dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes);
         }
 
         // 严格获取物理固有分辨率 naturalWidth，绝不使用 img.width 布局渲染宽度，防止 CSS 拉伸导致尺寸虚高
@@ -1036,40 +1212,44 @@ function extractImagesFromPage() {
             seenSrcs.add(originalSrc);
             images.push({
                 src: originalSrc,
-                thumbSrc: thumbSrc || (originalSrc !== currentImgSrc ? currentImgSrc : null),
+                thumbSrc: thumbSrc || (originalSrc !== resolvedCurrentSrc ? resolvedCurrentSrc : null),
                 width: naturalW,
                 height: naturalH
             });
         }
     });
 
-    // 提取 CSS 背景图（初始宽高设为 0，严禁使用外部容器 offsetWidth/offsetHeight 污染图片物理尺寸）
+    // 提取 CSS 背景图（规范化为绝对路径）
     document.querySelectorAll('*').forEach(el => {
         const style = window.getComputedStyle(el);
         const bgImage = style.backgroundImage;
         if (bgImage && bgImage !== 'none') {
             const urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
-            if (urlMatch && urlMatch[1] && !seenSrcs.has(urlMatch[1])) {
-                seenSrcs.add(urlMatch[1]);
-                images.push({
-                    src: urlMatch[1],
-                    thumbSrc: null,
-                    width: 0,
-                    height: 0
-                });
+            if (urlMatch && urlMatch[1]) {
+                const absBgUrl = toAbsoluteUrl(urlMatch[1]);
+                if (absBgUrl && !seenSrcs.has(absBgUrl)) {
+                    seenSrcs.add(absBgUrl);
+                    images.push({
+                        src: absBgUrl,
+                        thumbSrc: null,
+                        width: 0,
+                        height: 0
+                    });
+                }
             }
         }
     });
 
-    // 提取 picture source 响应式图片（初始宽高设为 0，交由尺寸探测池异步解析）
+    // 提取 picture source 响应式图片（规范化为绝对路径）
     document.querySelectorAll('picture source').forEach(source => {
         const srcset = source.srcset;
         if (srcset) {
             const srcs = srcset.split(',').map(s => s.trim().split(' ')[0]);
             srcs.forEach(src => {
-                if (src && !seenSrcs.has(src)) {
-                    seenSrcs.add(src);
-                    images.push({ src, thumbSrc: null, width: 0, height: 0 });
+                const absSrc = toAbsoluteUrl(src);
+                if (absSrc && !seenSrcs.has(absSrc)) {
+                    seenSrcs.add(absSrc);
+                    images.push({ src: absSrc, thumbSrc: null, width: 0, height: 0 });
                 }
             });
         }
@@ -1484,15 +1664,21 @@ function updateDownloadButton() {
     }
 }
 
+/**
+ * 刷新顶栏统计提示文本 (联动提取范围与来源标题)
+ */
 function updateStats() {
     if (!elements.stats) return;
     const total = state.filteredImages.length;
     const selected = state.selectedImages.size;
+    const scopeLabel = state.extractScope === 'current'
+        ? (state.sourceTabTitle ? `当前页 [${truncateString(state.sourceTabTitle, 10)}]` : '当前网页')
+        : '全部标签页';
 
     if (selected > 0) {
-        elements.stats.textContent = `已选择 ${selected} / ${total} 张`;
+        elements.stats.textContent = `${scopeLabel} · 已选 ${selected}/${total} 张`;
     } else {
-        elements.stats.textContent = `共 ${total} 张图片`;
+        elements.stats.textContent = `${scopeLabel} · 共 ${total} 张图片`;
     }
 }
 
@@ -1534,31 +1720,33 @@ function extractTabIdsFromImg(img) {
  * @param {Object} image 单张图片元数据对象
  */
 async function downloadSingleImage(image) {
-    const folder = state.downloadFolder || 'images';
-    showDiagnostics(`正在下载单张图片...`);
+    // 优先实时读取 DOM 控件中的最新输入值
+    const folder = (elements.downloadFolder ? elements.downloadFolder.value.trim() : state.downloadFolder) || 'images';
+    state.downloadFolder = folder;
+    saveSettings();
+
+    showDiagnostics(`正在下载单张图片到文件夹: ${folder}...`);
     try {
         const response = await chrome.runtime.sendMessage({
             action: 'download',
             url: image.src,
             folder: folder,
             tabId: image.tabId,
-            autoClose: state.autoCloseTabs
+            autoClose: state.autoCloseTabs,
+            isPreRegistered: false
         });
         if (response && response.success) {
-            appendDiagnosticsLog(`单图下载请求提交成功 ID: ${response.downloadId}`);
+            appendDiagnosticsLog(`单图下载落盘成功 ID: ${response.downloadId}`);
             if (elements.downloadDiagnosticsSummary) {
                 elements.downloadDiagnosticsSummary.textContent = '单图下载成功！';
             }
 
             // 若开启自动关页：关页统一由后台 Service Worker 在下载落盘完成后执行
-            // （后台基于 storage.session 持久化追踪 + 终态补偿查询，跨 SW 重启可靠）
             if (state.autoCloseTabs) {
                 const tabIdsToClose = extractTabIdsFromImg(image);
                 if (tabIdsToClose.length > 0) {
                     if (elements.downloadDiagnosticsLog) elements.downloadDiagnosticsLog.classList.remove('hidden');
-                    appendDiagnosticsLog(`[自动关页] 已登记 ${tabIdsToClose.length} 个关联标签页 (IDs: ${tabIdsToClose.join(', ')})，后台将在下载落盘完成后自动关闭。`);
-                } else {
-                    appendDiagnosticsLog(`[单图关页提示] 该图片未绑定有效来源标签页 ID (tabId: ${image.tabId})`);
+                    appendDiagnosticsLog(`[自动关页] 已为 ${tabIdsToClose.length} 个关联标签页登记关页追踪，落盘后将自动关闭。`);
                 }
             }
 
@@ -1566,7 +1754,7 @@ async function downloadSingleImage(image) {
                 if (elements.downloadDiagnostics) elements.downloadDiagnostics.classList.add('hidden');
             }, 4000);
         } else {
-            appendDiagnosticsLog(`下载失败: ${response?.error || '未知错误'}`);
+            appendDiagnosticsLog(`单图下载失败: ${response?.error || '下载被目标服务器拦截或中断'}`);
         }
     } catch (err) {
         appendDiagnosticsLog(`下载发送异常: ${err.message}`);
@@ -1586,21 +1774,54 @@ async function downloadSelected() {
         if (textSpan) textSpan.textContent = '下载处理中...';
     }
 
-    const folder = state.downloadFolder || 'images';
+    // 优先实时读取 DOM 控件中的最新输入值，彻底杜绝输入未失焦或内存状态未同步导致的失效
+    const folder = (elements.downloadFolder ? elements.downloadFolder.value.trim() : state.downloadFolder) || 'images';
+    const isRenaming = elements.renameToggle ? elements.renameToggle.checked : state.isRenaming;
+    const renamePrefix = (elements.renamePrefix ? elements.renamePrefix.value.trim() : state.renamePrefix) || '';
+
+    // 即时同步刷新至全局 state 并持久化保存
+    state.downloadFolder = folder;
+    state.isRenaming = isRenaming;
+    state.renamePrefix = renamePrefix;
+    saveSettings();
+
     let successCount = 0;
     let failCount = 0;
     const successfulTabIds = new Set(); // 搜集下载成功的关联 tabId 集合
 
     showDiagnostics(`开始批量下载 ${selectedImageList.length} 张图片到文件夹: ${folder}`);
 
+    // 若开启自动关页，循环前预先登记各个标签页的下载图片总数，防止首张图片快速落盘引发时序竞态提前误关网页
+    if (state.autoCloseTabs) {
+        const tabCounts = new Map();
+        selectedImageList.forEach(img => {
+            const tabIds = extractTabIdsFromImg(img);
+            tabIds.forEach(id => {
+                tabCounts.set(id, (tabCounts.get(id) || 0) + 1);
+            });
+        });
+
+        for (const [tabId, totalCount] of tabCounts.entries()) {
+            try {
+                await chrome.runtime.sendMessage({
+                    action: 'registerBatchDownloads',
+                    tabId: tabId,
+                    totalCount: totalCount
+                });
+            } catch (regErr) {
+                console.log('预登记批量任务异常:', regErr);
+            }
+        }
+    }
+
     for (let i = 0; i < selectedImageList.length; i++) {
         const image = selectedImageList[i];
         let filename = null;
 
-        if (state.isRenaming && state.renamePrefix) {
+        if (isRenaming && renamePrefix) {
             const ext = getExtensionFromUrl(image.src) || '.jpg';
             const num = String(i + 1).padStart(2, '0');
-            filename = `${state.renamePrefix}_${num}${ext}`;
+            filename = `${renamePrefix}_${num}${ext}`;
         }
 
         try {
@@ -1610,16 +1831,18 @@ async function downloadSelected() {
                 filename: filename,
                 folder: folder,
                 tabId: image.tabId,
-                autoClose: state.autoCloseTabs
+                autoClose: state.autoCloseTabs,
+                isPreRegistered: state.autoCloseTabs
             });
 
             if (response && response.success) {
                 successCount++;
                 extractTabIdsFromImg(image).forEach(id => successfulTabIds.add(id));
-                appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 下载成功 ID: ${response.downloadId} (${filename || '原始文件名'})`);
+                appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 下载落盘成功 ID: ${response.downloadId} (${filename || response.filename || '原始文件名'})`);
             } else {
                 failCount++;
-                appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 下载失败: ${response?.error || '未知错误'}`);
+                const errMsg = response?.error || '下载被目标服务器拦截或中断';
+                appendDiagnosticsLog(`[${i + 1}/${selectedImageList.length}] 下载失败: ${errMsg}`);
             }
         } catch (error) {
             failCount++;

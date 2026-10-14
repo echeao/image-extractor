@@ -57,7 +57,7 @@ Image Extractor - Gallery Page (画廊主页面)
             右侧：刷新、全选、核心下载按钮、主题切换、高级设置开合
             -->
             <header class="primary-bar">
-                <!-- 左侧区域：品牌与统计 -->
+                <!-- 左侧区域：品牌、提取范围切换与统计 -->
                 <div class="header-left">
                     <h1 class="title">
                         <span class="icon">
@@ -71,6 +71,26 @@ Image Extractor - Gallery Page (画廊主页面)
                         </span>
                         <span class="title-text">Image Extractor</span>
                     </h1>
+
+                    <!-- 提取范围模式切换胶囊 (分段切换：当前网页 vs 全部标签页) -->
+                    <div class="scope-mode-group" id="scopeModeGroup" role="tablist" aria-label="图片提取范围">
+                        <button class="scope-btn active" data-scope="current" id="scopeCurrentBtn" role="tab" aria-selected="true" title="仅提取打开画廊前所在的当前网页图片">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <circle cx="12" cy="12" r="3"></circle>
+                            </svg>
+                            <span>当前网页</span>
+                        </button>
+                        <button class="scope-btn" data-scope="all" id="scopeAllBtn" role="tab" aria-selected="false" title="提取浏览器中所有已打开网页的图片">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="2" y1="12" x2="22" y2="12"></line>
+                                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                            </svg>
+                            <span>全部标签页</span>
+                        </button>
+                    </div>
+
                     <span class="stats" id="stats">正在扫描...</span>
                 </div>
 

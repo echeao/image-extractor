@@ -28,15 +28,18 @@
  * 
  * chrome.action.onClicked:
  * - 当用户点击工具栏中的扩展图标时触发
- * - 只有当没有设置 popup 页面时才会触发
- * - 如果设置了 default_popup，点击会打开 popup 而不触发此事件
+ * - 接收触发点击操作时处于激活状态的标签页 tab 对象
+ * - 将其 tab.id 作为 sourceTabId 参数透传至画廊，便于画廊精确锁定当前来源网页
  */
-chrome.action.onClicked.addListener(() => {
-    // 使用 chrome.tabs.create 创建新标签页
+chrome.action.onClicked.addListener((tab) => {
+    // 构造画廊目标 URL：若存在合法的触发标签页 ID，则拼装 sourceTabId 查询参数
+    const targetUrl = tab && typeof tab.id === 'number'
+        ? chrome.runtime.getURL(`gallery/gallery.html?sourceTabId=${tab.id}`)
+        : chrome.runtime.getURL('gallery/gallery.html');
+
+    // 使用 chrome.tabs.create 创建画廊新标签页
     chrome.tabs.create({
-        // chrome.runtime.getURL 将相对路径转换为完整的扩展 URL
-        // 例如: chrome-extension://abc123/gallery/gallery.html
-        url: chrome.runtime.getURL('gallery/gallery.html')
+        url: targetUrl
     });
 });
 
@@ -225,6 +228,34 @@ function handleDownloadFinished(downloadId, finalState) {
     }
 }
 
+// ============================================================
+// 下载预期相对路径表与强制命名拦截器 (Chrome 官方权威命名管道)
+// ============================================================
+// 记录处于下载中任务预期的完整保存路径 (含子文件夹与自定义重命名)，
+// 用于在 chrome.downloads.onDeterminingFilename 中强力拦截并生效，
+// 彻底解决服务器响应头覆盖文件名或 Chrome 剥离子目录导致文件夹创建失效的问题。
+const plannedDownloadPaths = new Map(); // downloadId -> string
+
+/**
+ * 监听 Chrome 确定最终落盘路径与文件名事件
+ * 
+ * 核心机制说明：
+ * 1. 强制覆盖服务器返回的 Content-Disposition 响应头，绝不让服务器原文件名打乱用户的自定义重命名；
+ * 2. 强制 Chrome 创建并写入指定的子文件夹 (例如 images/ 或用户自定义目录)，杜绝路径被 Chrome 抹杀后散落至根目录；
+ * 3. 兼容 Data URL / Fetch 兜底下载，确保即便使用兜底通道，仍然强制落盘到目标子文件夹。
+ */
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    const plannedPath = plannedDownloadPaths.get(item.id);
+    if (plannedPath) {
+        console.log(`[强制命名拦截] 匹配下载任务 ${item.id} -> 强制应用目标落盘路径: ${plannedPath}`);
+        suggest({
+            filename: plannedPath,
+            conflictAction: 'uniquify'
+        });
+        return;
+    }
+});
+
 /**
  * 监听 Chrome 下载任务状态改变，当关联标签页的所有图片在磁盘保存完毕后平滑关页
  */
@@ -234,6 +265,9 @@ chrome.downloads.onChanged.addListener((delta) => {
     if (finalState !== 'complete' && finalState !== 'interrupted') return;
 
     console.log(`[自动关页] onChanged 事件: 下载 ${delta.id} -> ${finalState}`);
+    // 清理预期路径记录
+    plannedDownloadPaths.delete(delta.id);
+
     // 等待追踪状态恢复完成后再处理，避免状态尚未加载时误判
     trackerStateReady.then(() => {
         handleDownloadFinished(delta.id, finalState);
@@ -254,61 +288,27 @@ chrome.downloads.onChanged.addListener((delta) => {
  * @returns {boolean} - 返回 true 表示会异步发送响应
  */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    // 根据 action 字段判断消息类型
-    if (request.action === 'download') {
-        // 等待追踪状态恢复完成后再处理下载请求
+    // 批量下载前预先登记目标标签页的任务总数，防止首张图片极速落盘提前误关标签页
+    if (request.action === 'registerBatchDownloads') {
         trackerStateReady.then(() => {
-            const tabId = request.tabId;
-            const autoClose = Boolean(request.autoClose);
-
-            console.log(`[自动关页] 收到下载请求: tabId=${tabId}, autoClose=${autoClose}, url=${request.url}`);
-
-            // 如果开启了自动关页且有合法 tabId，递增计数
-            if (autoClose && tabId) {
-                incrementTabCount(tabId);
-            } else if (!autoClose) {
-                console.log('[自动关页] 警告: autoClose 为 false，不会登记关页追踪（请确认前端开关状态与设置同步）');
-            } else {
-                console.log(`[自动关页] 警告: tabId 无效 (${tabId})，无法登记关页追踪`);
+            const tabId = Number(request.tabId);
+            const count = Number(request.totalCount) || 0;
+            if (tabId && count > 0) {
+                const current = tabPendingCounts.get(tabId) || 0;
+                tabPendingCounts.set(tabId, current + count);
+                saveTrackerState();
+                console.log(`[自动关页] 批量预登记任务: tabId=${tabId}, 新增任务数=${count}, 当前待完成总数=${tabPendingCounts.get(tabId)}`);
             }
+            sendResponse({ success: true });
+        });
+        return true;
+    }
 
-            // 调用下载函数，处理图片下载
-            downloadImage(request.url, request.filename, request.folder)
-                .then(result => {
-                    // 登记失败绝不能阻塞 sendResponse，否则前端会一直等待
-                    try {
-                        if (autoClose && tabId && result.downloadId) {
-                            setPendingDownload(result.downloadId, { tabId, autoClose });
-                            console.log(`[自动关页] 已登记下载 ${result.downloadId} -> 标签页 ${tabId}，当前该页计数: ${tabPendingCounts.get(tabId)}`);
-
-                            // 竞态补偿：小图/缓存资源可能在登记之前就已完成落盘，
-                            // onChanged 的 complete 事件会因查不到记录而被永久错过，
-                            // 导致计数无法归零、标签页永不关闭。因此登记后立即主动
-                            // 查询一次当前状态，若已终态则直接处理（幂等，不重复关页）。
-                            chrome.downloads.search({ id: result.downloadId })
-                                .then(items => {
-                                    const item = items && items[0];
-                                    if (item && (item.state === 'complete' || item.state === 'interrupted')) {
-                                        handleDownloadFinished(result.downloadId, item.state);
-                                    }
-                                })
-                                .catch(err => console.log('补偿查询下载状态失败:', err));
-                        }
-                    } catch (err) {
-                        console.log('登记下载追踪失败:', err);
-                    }
-                    sendResponse({ success: true, ...result });
-                })
-                .catch(error => {
-                    try {
-                        if (autoClose && tabId) {
-                            decrementTabCount(tabId);
-                        }
-                    } catch (err) {
-                        console.log('递减下载追踪计数失败:', err);
-                    }
-                    sendResponse({ success: false, error: error.message });
-                });
+    // 处理单张图片下载请求 (支持真实落盘终态确认与 Fetch 防盗链兜底)
+    if (request.action === 'download') {
+        trackerStateReady.then(async () => {
+            const result = await executeImageDownload(request);
+            sendResponse(result);
         });
 
         // 重要：返回 true 表示我们会异步调用 sendResponse
@@ -324,68 +324,247 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 // ============================================================
-// 下载功能
+// 下载核心调度与防盗链兜底机制
 // ============================================================
 
 /**
- * 下载图片到本地
+ * 完整下载调度：优先原生下载，若失败/中断则自动启动 Fetch 兜底，并等待终态落盘确认
+ * 杜绝仅仅创建任务就虚报下载成功的严重缺陷
  * 
- * 使用 chrome.downloads API 将图片下载到用户的下载目录
- * Chrome 会自动创建不存在的子文件夹
- * 
- * @param {string} url - 图片的完整 URL
- * @param {string} suggestedFilename - 建议使用的文件名（可选）
- *                                     如果用户开启了批量重命名，这里会传入自定义文件名
- * @param {string} folder - 下载到的子文件夹名称
- *                          默认为 'images'，用户可以自定义
- * @throws {Error} 下载失败时抛出错误
+ * @param {object} request - 下载请求参数
+ * @returns {Promise<{ success: boolean, downloadId?: number, filename?: string, error?: string }>}
  */
-async function downloadImage(url, suggestedFilename, folder = 'images') {
-    try {
-        let filename;
+async function executeImageDownload(request) {
+    const { url, filename: suggestedFilename, folder = 'images', tabId, autoClose, isPreRegistered } = request;
 
-        // 确定文件名：优先使用传入的名称，否则从 URL 提取
-        if (suggestedFilename) {
-            filename = suggestedFilename;
-        } else {
-            filename = getFilenameFromUrl(url);
+    // 确定规范化文件名与存储相对路径
+    let filename = suggestedFilename ? suggestedFilename : getFilenameFromUrl(url);
+    filename = sanitizeFilename(filename);
+
+    if (!hasImageExtension(filename)) {
+        const ext = getExtensionFromUrl(url);
+        filename += (ext || '.jpg');
+    }
+
+    const safeFolder = sanitizeFolderPath(folder);
+    const downloadPath = safeFolder ? `${safeFolder}/${filename}` : filename;
+
+    // 若未预先登记且开启自动关页，递增计数
+    if (autoClose && tabId && !isPreRegistered) {
+        incrementTabCount(tabId);
+    }
+
+    let initialDownloadId = null;
+    let finalDownloadId = null;
+
+    try {
+        // 阶段 1：尝试 Chrome 原生下载通道
+        try {
+            initialDownloadId = await chrome.downloads.download({
+                url: url,
+                filename: downloadPath,
+                saveAs: false,
+                conflictAction: 'uniquify'
+            });
+            finalDownloadId = initialDownloadId;
+
+            // 登记预期落盘路径，确保 onDeterminingFilename 拦截生效
+            plannedDownloadPaths.set(initialDownloadId, downloadPath);
+
+            // 登记关页追踪记录
+            if (autoClose && tabId) {
+                setPendingDownload(initialDownloadId, { tabId, autoClose });
+            }
+        } catch (firstErr) {
+            console.log(`[原生下载初次创建失败] 准备触发 Fetch 兜底: ${firstErr.message}`);
         }
 
-        filename = sanitizeFilename(filename);
+        // 阶段 2：等待原生下载是否真正成功落盘 (支持排队中 in_progress 持续等待)
+        let completion = null;
+        if (initialDownloadId) {
+            completion = await waitForDownloadCompletion(initialDownloadId, 25000);
+        }
 
-        // 确保文件名有正确的图片扩展名
-        if (!hasImageExtension(filename)) {
-            // 尝试从 URL 获取扩展名
-            const ext = getExtensionFromUrl(url);
-            if (ext) {
-                filename += ext;
-            } else {
-                // 如果无法确定扩展名，默认使用 .jpg
-                filename += '.jpg';
+        // 阶段 3：若原生下载确已中断 (interrupted / 403 防盗链 / 报错)，启动 Fetch Blob 兜底
+        if (!completion || !completion.success) {
+            console.log(`[下载自愈] 原生下载确已中断 (${completion?.error || '创建失败'})，启动 Fetch 双轨通道: ${url}`);
+            try {
+                // 清除失效的旧 downloadId 追踪与路径登记
+                if (initialDownloadId) {
+                    plannedDownloadPaths.delete(initialDownloadId);
+                    if (autoClose && tabId) {
+                        deletePendingDownload(initialDownloadId);
+                    }
+                }
+
+                const fallbackId = await downloadViaFetchFallback(url, downloadPath);
+                finalDownloadId = fallbackId;
+
+                // 为兜底任务同样登记强制落盘路径
+                plannedDownloadPaths.set(fallbackId, downloadPath);
+
+                if (autoClose && tabId) {
+                    setPendingDownload(fallbackId, { tabId, autoClose });
+                }
+
+                completion = await waitForDownloadCompletion(fallbackId, 25000);
+            } catch (fallbackErr) {
+                console.error(`[下载自愈] Fetch 兜底通道亦失败: ${fallbackErr.message}`);
+                completion = { success: false, error: fallbackErr.message };
             }
         }
 
-        const safeFolder = sanitizeFolderPath(folder);
-        const downloadPath = safeFolder ? `${safeFolder}/${filename}` : filename;
-
-        // 执行下载
-        // chrome.downloads.download 返回一个 Promise（在 Manifest V3 中）
-        const downloadId = await chrome.downloads.download({
-            url: url,                              // 要下载的 URL
-            filename: downloadPath,               // 保存路径（相对于下载目录）
-            saveAs: false,                        // false = 使用默认位置，不弹出另存为对话框
-            conflictAction: 'uniquify'            // 重名时自动追加序号，避免下载失败
-        });
-
+        // 阶段 4：根据真实落盘结果回执前端
+        if (completion && completion.success) {
+            return {
+                success: true,
+                downloadId: finalDownloadId,
+                filename: filename
+            };
+        } else {
+            // 下载最终失败，清理路径与计数
+            if (finalDownloadId) plannedDownloadPaths.delete(finalDownloadId);
+            if (autoClose && tabId) {
+                decrementTabCount(tabId);
+                if (finalDownloadId) deletePendingDownload(finalDownloadId);
+            }
+            return {
+                success: false,
+                downloadId: finalDownloadId,
+                error: completion?.error || '下载被目标服务器中断或拦截 (403 防盗链/网络错误)'
+            };
+        }
+    } catch (unexpectedErr) {
+        if (finalDownloadId) plannedDownloadPaths.delete(finalDownloadId);
+        if (autoClose && tabId) {
+            decrementTabCount(tabId);
+            if (finalDownloadId) deletePendingDownload(finalDownloadId);
+        }
         return {
-            downloadId,
-            requestedFilename: filename,
-            requestedPath: downloadPath
+            success: false,
+            error: unexpectedErr.message
         };
-    } catch (error) {
-        console.error('下载失败:', url, error);
-        throw error; // 将错误传递给调用者
     }
+}
+
+/**
+ * 通过 Fetch 获取图片二进制流并转为 Base64 Data URL 下载 (防盗链与 403 强力兜底机制)
+ * @param {string} url - 图片原始 URL
+ * @param {string} downloadPath - 保存相对路径
+ * @returns {Promise<number>} Chrome 下载任务 ID
+ */
+async function downloadViaFetchFallback(url, downloadPath) {
+    console.log(`[防盗链兜底] 触发 Fetch 请求: ${url}`);
+    const response = await fetch(url, {
+        mode: 'cors',
+        credentials: 'include'
+    });
+
+    if (!response.ok) {
+        throw new Error(`HTTP 状态异常: ${response.status} ${response.statusText}`);
+    }
+
+    const blob = await response.blob();
+    const dataUrl = await blobToDataUrl(blob);
+
+    const downloadId = await chrome.downloads.download({
+        url: dataUrl,
+        filename: downloadPath,
+        saveAs: false,
+        conflictAction: 'uniquify'
+    });
+
+    return downloadId;
+}
+
+/**
+ * 将 Blob 转换为 Base64 Data URL (兼容无 DOM/FileReader 限制的 Service Worker 环境)
+ * @param {Blob} blob - 图片 Blob 对象
+ * @returns {Promise<string>} Base64 Data URL
+ */
+async function blobToDataUrl(blob) {
+    const buffer = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const len = bytes.byteLength;
+    const chunkSize = 8192;
+    for (let i = 0; i < len; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, len)));
+    }
+    const base64 = btoa(binary);
+    const mimeType = blob.type || 'image/jpeg';
+    return `data:${mimeType};base64,${base64}`;
+}
+
+/**
+ * 等待指定的 Chrome 下载任务真正达到落盘终态 (complete / interrupted)
+ * 绝不单凭分配了 downloadId 就虚报成功
+ * 
+ * @param {number} downloadId - 下载 ID
+ * @param {number} timeoutMs - 超时时间
+ * @returns {Promise<{ success: boolean, state: string, error?: string, filename?: string }>}
+ */
+function waitForDownloadCompletion(downloadId, timeoutMs = 15000) {
+    return new Promise((resolve) => {
+        let isResolved = false;
+        let timer = null;
+
+        const cleanup = () => {
+            if (timer) clearTimeout(timer);
+            chrome.downloads.onChanged.removeListener(onChangedHandler);
+        };
+
+        const doResolve = (result) => {
+            if (isResolved) return;
+            isResolved = true;
+            cleanup();
+            resolve(result);
+        };
+
+        const checkCurrentState = async () => {
+            try {
+                const items = await chrome.downloads.search({ id: downloadId });
+                const item = items && items[0];
+                if (item) {
+                    if (item.state === 'complete') {
+                        doResolve({ success: true, state: 'complete', filename: item.filename });
+                        return true;
+                    } else if (item.state === 'interrupted') {
+                        doResolve({ success: false, state: 'interrupted', error: item.error || '下载被中断' });
+                        return true;
+                    }
+                }
+            } catch (err) {
+                // 忽略主动查询异常
+            }
+            return false;
+        };
+
+        const onChangedHandler = (delta) => {
+            if (delta.id !== downloadId || !delta.state) return;
+            const state = delta.state.current;
+            if (state === 'complete') {
+                doResolve({ success: true, state: 'complete' });
+            } else if (state === 'interrupted') {
+                const error = delta.error ? delta.error.current : '下载被中断';
+                doResolve({ success: false, state: 'interrupted', error });
+            }
+        };
+
+        chrome.downloads.onChanged.addListener(onChangedHandler);
+
+        // 立即主动查询一次
+        checkCurrentState().then(finished => {
+            if (!finished) {
+                timer = setTimeout(async () => {
+                    const finishedNow = await checkCurrentState();
+                    if (!finishedNow) {
+                        doResolve({ success: false, state: 'timeout', error: '下载超时未完成' });
+                    }
+                }, timeoutMs);
+            }
+        });
+    });
 }
 
 // ============================================================
