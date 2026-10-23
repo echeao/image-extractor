@@ -35,9 +35,6 @@ const state = {
     selectedFormat: 'all',   // 图片格式筛选: 'all' | 'PNG' | 'JPG' | 'WEBP' | 'SVG' | 'GIF'
     selectedRatio: 'all',    // 图像比例筛选: 'all' | 'landscape' | 'portrait' | 'square'
 
-    // ---------- 交互模式 ----------
-    clickAction: 'select',   // 默认点击行为: 'select'（选择模式）
-
     // ---------- 下载设置 ----------
     isRenaming: false,       // 是否开启批量重命名
     renamePrefix: '',        // 重命名前缀（如 image -> image_01.jpg）
@@ -48,6 +45,17 @@ const state = {
     extractScope: 'current',   // 提取模式: 'current' (仅当前标签页) | 'all' (全部标签页)
     sourceTabId: null,         // 来源目标标签页 ID (由 background 透传或自动识别)
     sourceTabTitle: '',        // 来源目标标签页标题 (用于 UI 展示与悬浮提示)
+    sourceTabUrl: '',          // 来源目标标签页地址 (用于翻页地址解析)
+
+    // ---------- 自动翻页 ----------
+    autoPaginate: false,       // 当前网页模式下是否自动抓取后续分页
+    paginateMaxPages: 20,      // 最多扫描页数（包含首页）
+    isCrawling: false,         // 是否正在翻页抓取
+    crawlPage: 0,              // 当前正在抓取的页序号
+    crawlTotalPages: 0,        // 本次翻页上限
+    pagesScanned: 1,           // 本次已扫描页数（含首页）
+    crawlAbort: false,         // 用户中止或新一轮扫描标记
+    extractRunId: 0,           // 扫描轮次令牌，用于中止过期任务
 
     // ---------- 显示与主题设置 ----------
     columnCount: 5,           // 瀑布流列数（1-8）
@@ -86,7 +94,9 @@ async function saveSettings() {
             canvasBg: state.canvasBg,
             autoCloseTabs: state.autoCloseTabs,
             isRenaming: state.isRenaming,        // 保存重命名开关状态
-            renamePrefix: state.renamePrefix     // 保存重命名前缀文本
+            renamePrefix: state.renamePrefix,    // 保存重命名前缀文本
+            autoPaginate: state.autoPaginate,    // 自动翻页开关
+            paginateMaxPages: state.paginateMaxPages // 自动翻页页数上限
         };
         await chrome.storage.local.set({ [STORAGE_KEY]: settings });
         console.log('设置已成功保存:', settings);
@@ -117,6 +127,8 @@ async function loadSettings() {
             state.autoCloseTabs = settings.autoCloseTabs ?? false;
             state.isRenaming = settings.isRenaming ?? false;      // 恢复重命名开关状态
             state.renamePrefix = settings.renamePrefix ?? '';    // 恢复重命名前缀文本
+            state.autoPaginate = settings.autoPaginate ?? false;
+            state.paginateMaxPages = clampPaginateMaxPages(settings.paginateMaxPages);
             console.log('设置已加载恢复:', settings);
         } else {
             state.extractScope = 'current';
@@ -145,6 +157,9 @@ function applySettingsToUI() {
     // 3. 下载配置与自动关页选项恢复
     if (elements.downloadFolder) elements.downloadFolder.value = state.downloadFolder;
     if (elements.autoCloseTabsToggle) elements.autoCloseTabsToggle.checked = state.autoCloseTabs;
+    if (elements.autoPaginateToggle) elements.autoPaginateToggle.checked = state.autoPaginate;
+    if (elements.paginateMaxPages) elements.paginateMaxPages.value = String(state.paginateMaxPages);
+    updateAutoPaginateUI();
 
     // 4. 重命名开关与前缀输入框UI恢复
     if (elements.renameToggle) elements.renameToggle.checked = state.isRenaming;
@@ -193,6 +208,9 @@ const elements = {
     scopeModeGroup: document.getElementById('scopeModeGroup'),
     scopeCurrentBtn: document.getElementById('scopeCurrentBtn'),
     scopeAllBtn: document.getElementById('scopeAllBtn'),
+    autoPaginateControl: document.getElementById('autoPaginateControl'),
+    autoPaginateToggle: document.getElementById('autoPaginateToggle'),
+    paginateMaxPages: document.getElementById('paginateMaxPages'),
 
     // 关键操作按钮
     refreshBtn: document.getElementById('refreshBtn'),
@@ -401,6 +419,14 @@ async function init() {
         elements.scopeAllBtn.addEventListener('click', () => setExtractScope('all'));
     }
 
+    // 自动翻页开关与页数上限
+    if (elements.autoPaginateToggle) {
+        elements.autoPaginateToggle.addEventListener('change', handleAutoPaginateChange);
+    }
+    if (elements.paginateMaxPages) {
+        elements.paginateMaxPages.addEventListener('change', handlePaginateMaxPagesChange);
+    }
+
     // 解析 URL 参数中的来源标签页 ID (由 background.js 透传)
     parseSourceTabIdFromUrl();
 
@@ -495,17 +521,79 @@ function updateScopeUI() {
         elements.scopeAllBtn.classList.toggle('active', !isCurrent);
         elements.scopeAllBtn.setAttribute('aria-selected', !isCurrent ? 'true' : 'false');
     }
+
+    document.body.classList.toggle('scope-single', isCurrent);
+    updateAutoPaginateUI();
 }
 
 /**
- * 文本截断辅助函数
- * @param {string} str 原始字符串
- * @param {number} maxLen 最大字符数
- * @returns {string} 截断后的字符串
+ * 同步自动翻页开关与进行中状态的 UI
  */
-function truncateString(str, maxLen = 14) {
-    if (!str || typeof str !== 'string') return '';
-    return str.length > maxLen ? str.slice(0, maxLen) + '...' : str;
+function updateAutoPaginateUI() {
+    const isCurrent = state.extractScope === 'current';
+    if (elements.autoPaginateControl) {
+        elements.autoPaginateControl.classList.toggle('hidden', !isCurrent);
+    }
+    if (elements.autoPaginateToggle) {
+        elements.autoPaginateToggle.checked = state.autoPaginate;
+        elements.autoPaginateToggle.disabled = !isCurrent;
+    }
+
+    if (elements.autoPaginateControl) {
+        elements.autoPaginateControl.classList.toggle('is-crawling', state.isCrawling && isCurrent);
+    }
+}
+
+/**
+ * 规范化翻页上限，限制在 2~100 页
+ * @param {unknown} value
+ * @returns {number}
+ */
+function clampPaginateMaxPages(value) {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return 20;
+    return Math.max(2, Math.min(100, parsed));
+}
+
+/**
+ * 切换自动翻页开关
+ * 开启时立即重新扫描当前网页并开始翻页；关闭时中止正在进行的翻页。
+ * @param {Event} event
+ */
+function handleAutoPaginateChange(event) {
+    state.autoPaginate = Boolean(event.target.checked);
+    updateAutoPaginateUI();
+    saveSettings();
+
+    if (!state.autoPaginate) {
+        state.crawlAbort = true;
+        updateStats();
+        return;
+    }
+
+    if (state.extractScope === 'current') {
+        extractImages();
+    }
+}
+
+/**
+ * 更新自动翻页页数上限
+ * @param {Event} event
+ */
+function handlePaginateMaxPagesChange(event) {
+    state.paginateMaxPages = clampPaginateMaxPages(event.target.value);
+    event.target.value = String(state.paginateMaxPages);
+    saveSettings();
+    if (!state.isCrawling) updateStats();
+}
+
+/**
+ * 泛用延时
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ============================================================
@@ -684,7 +772,7 @@ let debouncedFilterTimer = null;
 function scheduleDebouncedApplyFilter() {
     if (debouncedFilterTimer) clearTimeout(debouncedFilterTimer);
     debouncedFilterTimer = setTimeout(() => {
-        applyFilter();
+        applyFilter({ preserveSelection: true });
     }, 120);
 }
 
@@ -744,15 +832,30 @@ function handleImageDimensionResolved(image, realWidth, realHeight, cardElement 
 
 /**
  * 联合应用分辨率、自定义尺寸、文件格式与比例综合筛选
+ *
+ * @param {{ preserveSelection?: boolean }} [options]
+ * preserveSelection 用于自动翻页增量合并、异步尺寸探测等后台更新场景，
+ * 避免用户已选中的图片被无谓清空；手动切换筛选条件时仍会重置选择。
  */
-function applyFilter() {
-    state.selectedImages.clear();
-    state.lastSelectedIndex = null;
+function applyFilter(options = {}) {
+    const preserveSelection = options.preserveSelection === true;
+
+    if (!preserveSelection) {
+        state.selectedImages.clear();
+        state.lastSelectedIndex = null;
+    }
 
     state.filteredImages = state.images.filter(img => isImagePassingCurrentFilter(img));
 
     // 4. 瀑布流图片横竖屏分组优化编排（宽屏图片集中在最前，竖屏图片集中在后）
     state.filteredImages = sortImagesByAspectRatio(state.filteredImages);
+
+    if (preserveSelection) {
+        const visibleSrcs = new Set(state.filteredImages.map(img => img.src));
+        for (const src of [...state.selectedImages]) {
+            if (!visibleSrcs.has(src)) state.selectedImages.delete(src);
+        }
+    }
 
     updateFilterStats();
 
@@ -761,6 +864,10 @@ function applyFilter() {
     } else {
         renderImages();
     }
+
+    updateStats();
+    updateSelectAllButton();
+    updateDownloadButton();
 }
 
 /**
@@ -961,6 +1068,14 @@ async function generateThumbnailBlobUrl(imageSrc, imageObj = null, maxDimension 
 // 图片提取核心逻辑 (支持「仅当前网页」与「全部标签页」模式)
 // ============================================================
 async function extractImages() {
+    const runId = ++state.extractRunId;
+    state.crawlAbort = false;
+    state.isCrawling = false;
+    state.crawlPage = 0;
+    state.crawlTotalPages = 0;
+    state.pagesScanned = 1;
+    updateAutoPaginateUI();
+
     showLoader();
 
     // 更新扫描状态文本
@@ -980,6 +1095,7 @@ async function extractImages() {
 
     try {
         let validTabs = [];
+        let primaryTab = null;
 
         // 统一检测标签页 URL 是否允许注入 content script
         const isInjectableTab = (tab) => {
@@ -1027,6 +1143,9 @@ async function extractImages() {
 
             if (targetTab) {
                 validTabs = [targetTab];
+                primaryTab = targetTab;
+                state.sourceTabId = targetTab.id;
+                state.sourceTabUrl = targetTab.url || targetTab.pendingUrl || '';
                 state.sourceTabTitle = targetTab.title || '当前网页';
                 updateScopeUI();
             } else {
@@ -1051,68 +1170,440 @@ async function extractImages() {
             return;
         }
 
+        const imageMap = new Map();
+        let initialPayload = null;
+
         const imagePromises = validTabs.map(async (tab) => {
             try {
-                const scriptPromise = chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: extractImagesFromPage
-                });
+                const payload = await executeScrapeInTab(tab.id, null, 8000);
 
-                const timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), 2500));
-                const results = await Promise.race([scriptPromise, timeoutPromise]);
+                if (runId !== state.extractRunId) return;
 
-                if (results && results[0] && results[0].result) {
-                    return results[0].result.map(img => ({
-                        ...img,
-                        tabTitle: tab.title || 'Unknown',
-                        tabId: tab.id
-                    }));
+                if (payload && Array.isArray(payload.images)) {
+                    ingestImages(imageMap, payload.images, tab);
+                    if (primaryTab && tab.id === primaryTab.id) {
+                        initialPayload = payload;
+                    }
                 }
             } catch (error) {
                 console.log(`无法从标签页提取图片或标签页已关闭: ${tab.url}`, error);
             }
-            return [];
         });
 
-        const globalTimeoutPromise = new Promise(resolve => setTimeout(() => resolve([]), 6000));
-        const allImagesResult = await Promise.race([
-            Promise.all(imagePromises),
-            globalTimeoutPromise
-        ]);
+        await Promise.all(imagePromises);
 
-        const flatImages = allImagesResult.flat();
-        const urlMap = new Map();
+        if (runId !== state.extractRunId) return;
 
-        flatImages.forEach(img => {
-            if (!urlMap.has(img.src)) {
-                const initialTabIds = typeof img.tabId === 'number' ? [img.tabId] : [];
-                urlMap.set(img.src, {
-                    ...img,
-                    tabIds: initialTabIds
-                });
-            } else {
-                const existing = urlMap.get(img.src);
-                if (typeof img.tabId === 'number' && Array.isArray(existing.tabIds)) {
-                    if (!existing.tabIds.includes(img.tabId)) {
-                        existing.tabIds.push(img.tabId);
-                    }
-                }
+        if (primaryTab && initialPayload) {
+            const resolvedTitle = primaryTab.title || initialPayload.pageTitle || '';
+            if (resolvedTitle) {
+                state.sourceTabTitle = resolvedTitle;
+                updateScopeUI();
             }
-        });
+            if (initialPayload.pageUrl) {
+                state.sourceTabUrl = initialPayload.pageUrl;
+            }
+        }
 
-        state.images = Array.from(urlMap.values());
+        state.images = Array.from(imageMap.values());
 
-        if (state.images.length === 0) {
+        const canPaginate = state.autoPaginate && state.extractScope === 'current' && Boolean(primaryTab);
+
+        if (state.images.length === 0 && !canPaginate) {
             showEmptyState();
-        } else {
+            return;
+        }
+
+        if (state.images.length > 0) {
             applyFilter();
             // 启动异步真实物理尺寸探测，自动补齐 WebP / 背景图等真实物理尺寸并动态重筛
             probeImageDimensions(state.images);
         }
+
+        // 自动翻页仅在当前网页模式下启用
+        if (canPaginate && runId === state.extractRunId) {
+            const startUrl = initialPayload?.pageUrl || state.sourceTabUrl;
+            const nextUrl = initialPayload?.nextUrl || inferNextPageUrl(startUrl);
+
+            if (nextUrl) {
+                await crawlPaginatedPages({
+                    runId,
+                    tabId: primaryTab.id,
+                    tabTitle: state.sourceTabTitle,
+                    imageMap,
+                    startUrl,
+                    nextUrl,
+                    initialPageCount: 1
+                });
+            }
+        }
+
+        if (state.images.length === 0 && runId === state.extractRunId) {
+            showEmptyState();
+        }
     } catch (error) {
         console.error('提取图片出错:', error);
-        showEmptyState();
+        if (runId === state.extractRunId) showEmptyState();
     }
+}
+
+/**
+ * 在指定标签页执行页面抓取函数
+ *
+ * @param {number} tabId 目标标签页
+ * @param {Array|null} args 传给页面抓取函数的参数；首页传 null，后续页传 [nextUrl] 或 [null, html, finalUrl]
+ * @param {number} timeoutMs 超时时间
+ * @returns {Promise<Object|null>} { images, nextUrl, pageUrl, pageTitle, error, errorType }
+ */
+async function executeScrapeInTab(tabId, args = null, timeoutMs = 12000) {
+    const scriptPromise = chrome.scripting.executeScript({
+        target: { tabId },
+        func: scrapeImagesFromPage,
+        ...(Array.isArray(args) ? { args } : {})
+    });
+
+    let timer = null;
+    const timeoutPromise = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('页面抓取超时')), timeoutMs);
+    });
+
+    try {
+        const results = await Promise.race([scriptPromise, timeoutPromise]);
+        return results && results[0] ? results[0].result : null;
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+/**
+ * 将某一页提取到的图片并入统一 Map（按图片 URL 精确去重）
+ *
+ * @param {Map<string, Object>} imageMap
+ * @param {Array<Object>} images
+ * @param {{id: number, title: string}} tab
+ * @returns {Array<Object>} 本次新增的图片记录
+ */
+function ingestImages(imageMap, images, tab) {
+    const added = [];
+    if (!Array.isArray(images)) return added;
+
+    images.forEach(img => {
+        if (!img || typeof img.src !== 'string' || !img.src) return;
+
+        const existing = imageMap.get(img.src);
+        if (existing) {
+            if (typeof tab.id === 'number' && Array.isArray(existing.tabIds) && !existing.tabIds.includes(tab.id)) {
+                existing.tabIds.push(tab.id);
+            }
+            return;
+        }
+
+        const record = {
+            ...img,
+            tabTitle: tab.title || 'Unknown',
+            tabId: tab.id,
+            tabIds: typeof tab.id === 'number' ? [tab.id] : []
+        };
+        imageMap.set(record.src, record);
+        added.push(record);
+    });
+
+    return added;
+}
+
+/**
+ * 合并后续分页图片并增量刷新画廊
+ *
+ * @param {Map<string, Object>} imageMap
+ * @param {Array<Object>} images
+ * @param {{id: number, title: string}} tab
+ * @returns {number} 新增图片数量
+ */
+function mergePageImages(imageMap, images, tab) {
+    const added = ingestImages(imageMap, images, tab);
+    if (added.length === 0) return 0;
+
+    state.images = Array.from(imageMap.values());
+    applyFilter({ preserveSelection: true });
+    probeImageDimensions(added);
+    return added.length;
+}
+
+/**
+ * 自动翻页主循环
+ *
+ * 策略：优先跟随页面自身给出的下一页链接；页面没有链接时按 URL 数字模式推导。
+ * 每页请求串行并保留间隔，遇到重复页、无新增图片、HTTP 失败或达到上限即停止。
+ */
+async function crawlPaginatedPages({ runId, tabId, tabTitle, imageMap, startUrl, nextUrl, initialPageCount = 1 }) {
+    if (runId !== state.extractRunId || state.crawlAbort) return;
+
+    const maxPages = clampPaginateMaxPages(state.paginateMaxPages);
+    const visited = new Set();
+    const startKey = normalizePageUrl(startUrl);
+    if (startKey) visited.add(startKey);
+
+    let candidate = nextUrl;
+    let pageCount = initialPageCount;
+    let stopReason = '';
+
+    state.isCrawling = true;
+    state.crawlPage = Math.min(pageCount + 1, maxPages);
+    state.crawlTotalPages = maxPages;
+    state.pagesScanned = initialPageCount;
+    updateAutoPaginateUI();
+    updateStats();
+
+    try {
+        while (candidate && runId === state.extractRunId && !state.crawlAbort) {
+            if (pageCount >= maxPages) {
+                stopReason = `已达到 ${maxPages} 页上限`;
+                break;
+            }
+
+            const normalized = normalizePageUrl(candidate);
+            if (!normalized) {
+                stopReason = '下一页地址无效';
+                break;
+            }
+            if (visited.has(normalized)) {
+                stopReason = '检测到重复翻页地址';
+                break;
+            }
+            if (!(await isTabAlive(tabId))) {
+                stopReason = '来源标签页已关闭';
+                break;
+            }
+
+            visited.add(normalized);
+            state.crawlPage = pageCount + 1;
+            updateStats();
+
+            let payload = null;
+            try {
+                payload = await executeScrapeInTab(tabId, [normalized], 16000);
+            } catch (error) {
+                console.log('页面上下文抓取失败，尝试后台兜底:', error);
+                payload = { images: [], errorType: 'network', error: error.message, pageUrl: normalized };
+            }
+
+            if (runId !== state.extractRunId || state.crawlAbort) break;
+
+            if (!payload) {
+                stopReason = '页面未返回内容';
+                break;
+            }
+
+            // 页面上下文 fetch 失败（跨域/CORS/网络）时，改由后台服务端抓取再回传 HTML 解析
+            if (payload.errorType === 'network') {
+                if (!(await isTabAlive(tabId))) {
+                    stopReason = '来源标签页已关闭';
+                    break;
+                }
+
+                const fallback = await fetchPageHtmlViaBackground(normalized);
+                if (!fallback.success) {
+                    stopReason = fallback.error || '页面抓取失败';
+                    break;
+                }
+
+                try {
+                    payload = await executeScrapeInTab(
+                        tabId,
+                        [null, fallback.html, fallback.finalUrl || normalized],
+                        16000
+                    );
+                } catch (error) {
+                    stopReason = '页面解析失败';
+                    break;
+                }
+            }
+
+            if (payload?.error) {
+                stopReason = payload.error;
+                break;
+            }
+
+            if (runId !== state.extractRunId || state.crawlAbort) break;
+
+            const effectiveUrl = normalizePageUrl(payload?.pageUrl || normalized);
+            if (effectiveUrl) visited.add(effectiveUrl);
+
+            const pageImages = Array.isArray(payload?.images) ? payload.images : [];
+            if (pageImages.length === 0) {
+                stopReason = '后续页面没有可解析的图片';
+                break;
+            }
+
+            const added = mergePageImages(imageMap, pageImages, { id: tabId, title: tabTitle });
+            if (added === 0) {
+                stopReason = '后续页面没有新增图片';
+                break;
+            }
+
+            pageCount += 1;
+            state.pagesScanned = pageCount;
+            state.crawlPage = pageCount;
+
+            const discoveredNext = payload?.nextUrl || inferNextPageUrl(payload?.pageUrl || normalized);
+            candidate = discoveredNext;
+            if (!candidate) break;
+
+            if (normalizePageUrl(candidate) === normalized) {
+                stopReason = '翻页地址未推进';
+                break;
+            }
+
+            await delay(360);
+        }
+
+        if (state.crawlAbort) stopReason = '已停止';
+    } catch (error) {
+        stopReason = error.message || '翻页过程中发生异常';
+        console.error('自动翻页失败:', error);
+    } finally {
+        if (runId === state.extractRunId) {
+            state.isCrawling = false;
+            state.crawlPage = 0;
+            state.crawlTotalPages = 0;
+            updateAutoPaginateUI();
+            updateStats();
+
+            if (state.images.length === 0) {
+                showEmptyState();
+            }
+
+            if (pageCount > initialPageCount) {
+                const summary = stopReason
+                    ? `自动翻页停止：${stopReason} · 共 ${pageCount} 页`
+                    : `自动翻页完成 · 共 ${pageCount} 页`;
+                showCrawlNotice(summary);
+            } else if (stopReason) {
+                console.log('自动翻页未开始:', stopReason);
+                showCrawlNotice(`自动翻页未开始：${stopReason}`);
+            }
+        }
+    }
+}
+
+/**
+ * 规范化分页地址，拒绝非 HTTP(S) 地址并移除 hash
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+function normalizePageUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    try {
+        const url = new URL(rawUrl, state.sourceTabUrl || window.location.href);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+        url.hash = '';
+        return url.href;
+    } catch {
+        return '';
+    }
+}
+
+/**
+ * 页面没有显式下一页链接时，按常见分页 URL 模式推导下一页
+ *
+ * 支持：
+ * - /photos/ -> /photos/2/，/photos/2/ -> /photos/3/
+ * - /photos/page/2 -> /photos/page/3
+ * - ?page=1 -> ?page=2（paged/pg/p/pageNo/page_no 同理）
+ *
+ * @param {string} rawUrl 当前页地址
+ * @returns {string} 推导出的下一页地址；无法推导时返回空字符串
+ */
+function inferNextPageUrl(rawUrl) {
+    const normalized = normalizePageUrl(rawUrl);
+    if (!normalized) return '';
+
+    try {
+        const url = new URL(normalized);
+        const pageKeys = ['page', 'paged', 'pg', 'p', 'pageNo', 'page_no'];
+
+        for (const key of pageKeys) {
+            if (!url.searchParams.has(key)) continue;
+            const value = parseInt(url.searchParams.get(key), 10);
+            if (Number.isFinite(value) && value >= 1) {
+                url.searchParams.set(key, String(value + 1));
+                return url.href;
+            }
+        }
+
+        const parts = url.pathname.split('/').filter(Boolean);
+        const last = parts[parts.length - 1] || '';
+        const hasTrailingSlash = url.pathname.endsWith('/');
+
+        if (/^\d{1,5}$/.test(last)) {
+            parts[parts.length - 1] = String(parseInt(last, 10) + 1);
+            url.pathname = `/${parts.join('/')}${hasTrailingSlash ? '/' : ''}`;
+            return url.href;
+        }
+
+        if (parts.length > 0 && hasTrailingSlash) {
+            url.pathname = `${url.pathname}2/`;
+            return url.href;
+        }
+
+        if (parts.length > 0 && !last.includes('.') && !url.search) {
+            url.pathname = `${url.pathname}/2/`;
+            return url.href;
+        }
+    } catch (error) {
+        console.log('推导下一页地址失败:', error);
+    }
+
+    return '';
+}
+
+/**
+ * 判断来源标签页是否仍然存活
+ * @param {number} tabId
+ * @returns {Promise<boolean>}
+ */
+async function isTabAlive(tabId) {
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        return Boolean(tab);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 跨域分页抓取兜底：委托后台 Service Worker 使用宿主权限请求
+ * @param {string} url
+ * @returns {Promise<{success: boolean, html?: string, finalUrl?: string, error?: string}>}
+ */
+async function fetchPageHtmlViaBackground(url) {
+    try {
+        const response = await chrome.runtime.sendMessage({
+            action: 'fetchPageHtml',
+            url
+        });
+        return response || { success: false, error: '后台未返回结果' };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+let crawlNoticeTimer = null;
+
+/**
+ * 在右下角轻量提示翻页结果，并自动淡出
+ * @param {string} message
+ */
+function showCrawlNotice(message) {
+    if (!elements.downloadDiagnostics) return;
+    showDiagnostics(message);
+
+    if (crawlNoticeTimer) clearTimeout(crawlNoticeTimer);
+    crawlNoticeTimer = setTimeout(() => {
+        if (elements.downloadDiagnosticsSummary?.textContent === message) {
+            elements.downloadDiagnostics.classList.add('hidden');
+        }
+    }, 5000);
 }
 
 /**
@@ -1148,129 +1639,422 @@ function probeImageDimensions(images) {
 }
 
 /**
- * 网页 DOM 节点图片提取脚本
- * 
- * 职责说明：
- * 运行在目标标签页上下文中的 DOM 提取函数，负责：
- * 1. 扫描页面中所有 <img> 元素，智能解析并分离原图 URL (src) 与缩略图 URL (thumbSrc)；
- * 2. 扫描元素的 CSS background-image 背景图地址；
- * 3. 扫描 <picture>/srcset 响应式资源；
- * 4. 过滤追踪像素与极小位图图标。
- * 
- * @returns {Array<Object>} 提取出的图片元数据数组 { src, thumbSrc, width, height }
+ * 页面抓取函数（由 chrome.scripting.executeScript 注入目标标签页执行）
+ *
+ * 三种模式：
+ * 1. 实时 DOM 模式：不传参数，扫描当前标签页已加载的 DOM；
+ * 2. 页面内抓取模式：传入 fetchUrl，在页面上下文请求后续分页 HTML（保留 Cookie/登录态）；
+ * 3. HTML 解析模式：传入 providedHtml，解析后台 Service Worker 兜底抓取到的 HTML。
+ *
+ * 注意：该函数会被序列化后注入页面，不能引用画廊作用域中的任何变量或函数。
+ *
+ * @param {string|null} fetchUrl 需要抓取的分页地址
+ * @param {string|null} providedHtml 已抓取到的页面 HTML
+ * @param {string|null} providedUrl 已抓取 HTML 对应的最终地址
+ * @returns {Promise<{images: Array, nextUrl: string, pageUrl: string, pageTitle: string, isLive: boolean, error?: string, errorType?: string}>}
  */
-function extractImagesFromPage() {
-    const images = [];
-    const seenSrcs = new Set();
+async function scrapeImagesFromPage(fetchUrl = null, providedHtml = null, providedUrl = null) {
+    function emptyResult(pageUrl, extra = {}) {
+        return {
+            images: [],
+            nextUrl: '',
+            pageUrl: pageUrl || '',
+            pageTitle: '',
+            isLive: false,
+            ...extra
+        };
+    }
 
-    /**
-     * 将任意相对路径、无协议 URL 转换为当前页面基准的绝对 HTTP/HTTPS URL
-     * 避免直接传给 chrome.downloads 时因路径相对或协议缺失被 Chrome 静默中断
-     * @param {string} rawUrl 原始 URL 字符串
-     * @returns {string} 规范化后的绝对 URL
-     */
-    function toAbsoluteUrl(rawUrl) {
+    function toAbsoluteUrl(rawUrl, baseUrl) {
         if (!rawUrl || typeof rawUrl !== 'string') return '';
-        const trimmed = rawUrl.trim();
-        if (!trimmed || trimmed.startsWith('javascript:')) return '';
-        // Data URL 与 Blob URL 直接保留
-        if (trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return trimmed;
+        const trimmed = rawUrl.trim().replace(/^['"]|['"]$/g, '');
+        if (!trimmed) return '';
+        if (trimmed.startsWith('javascript:') || trimmed.startsWith('blob:') || trimmed.startsWith('about:')) return '';
+        if (trimmed.startsWith('data:')) return /^data:image\//i.test(trimmed) ? trimmed : '';
         try {
-            return new URL(trimmed, document.baseURI).href;
+            const url = new URL(trimmed, baseUrl || document.baseURI);
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+            return url.href;
         } catch {
-            return trimmed;
+            return '';
         }
     }
 
-    document.querySelectorAll('img').forEach(img => {
-        const dataset = img.dataset || {};
-        
-        // 尝试捕获原图高清链接（如 data-original / data-full-src / data-high-res / data-zoom-image 等）
-        const rawHighRes = dataset.original || dataset.fullSrc || dataset.highRes || dataset.zoomImage || dataset.src || dataset.lazySrc;
-        const currentImgSrc = img.src || '';
+    function parseSrcset(srcset) {
+        if (!srcset || typeof srcset !== 'string') return [];
+        return srcset.split(',').map(part => {
+            const bits = part.trim().split(/\s+/);
+            const url = bits[0] || '';
+            const descriptor = (bits[1] || '').toLowerCase();
+            let width = 0;
+            let density = 0;
+            if (/^\d+(?:\.\d+)?w$/.test(descriptor)) width = parseFloat(descriptor);
+            else if (/^\d+(?:\.\d+)?x$/.test(descriptor)) density = parseFloat(descriptor);
+            return { url, width, density };
+        }).filter(item => item.url);
+    }
 
-        // 统一规范化为绝对地址
-        const resolvedHighRes = rawHighRes ? toAbsoluteUrl(rawHighRes) : '';
-        const resolvedCurrentSrc = currentImgSrc ? toAbsoluteUrl(currentImgSrc) : '';
-
-        // 确定高清原图地址 (src)
-        const originalSrc = resolvedHighRes || resolvedCurrentSrc;
-
-        // 确定低清预览缩略图地址 (thumbSrc)：若存在高清原图 data 属性且与 currentImgSrc 不同，则 currentImgSrc 即为缩略图
-        let thumbSrc = null;
-        if (resolvedHighRes && resolvedCurrentSrc && resolvedHighRes !== resolvedCurrentSrc) {
-            thumbSrc = resolvedCurrentSrc;
-        } else if (dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes) {
-            thumbSrc = toAbsoluteUrl(dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes);
+    function stripHash(url) {
+        try {
+            const parsed = new URL(url);
+            parsed.hash = '';
+            return parsed.href;
+        } catch {
+            return url;
         }
+    }
 
-        // 严格获取物理固有分辨率 naturalWidth，绝不使用 img.width 布局渲染宽度，防止 CSS 拉伸导致尺寸虚高
-        const naturalW = img.naturalWidth || 0;
-        const naturalH = img.naturalHeight || 0;
+    /**
+     * 判断 URL 是否为懒加载占位资源（透明像素、loading 图、空白 SVG 等）。
+     * 静态 HTML 中真实图片通常藏在 data-* 属性里，直接展示占位图会得到空白卡片。
+     */
+    function isPlaceholderImageUrl(url) {
+        if (!url || typeof url !== 'string') return true;
+        if (/^data:/i.test(url)) {
+            return /^data:image\/svg\+xml/i.test(url) || url.length < 1024;
+        }
+        if (!/^https?:/i.test(url)) return true;
+        const lower = url.toLowerCase();
+        return /(?:^|[/_.?&=-])(placeholder|blank|transparent|spacer|pixel|tracking|preloader|loader|loading|1x1|1px|dummy|no[-_]?image|noimg)(?:[/_.?&=-]|$)/.test(lower);
+    }
 
-        if (originalSrc && !seenSrcs.has(originalSrc) && isValidImage(img, originalSrc)) {
-            seenSrcs.add(originalSrc);
+    /**
+     * 提取图片：<img> / <picture source srcset> / CSS 背景图
+     */
+    function harvest(root, resolveBase, isLive) {
+        const images = [];
+        const seen = new Set();
+
+        const pushImage = (src, thumbSrc, width, height) => {
+            if (!src || seen.has(src) || isPlaceholderImageUrl(src)) return;
+            if (width > 0 && height > 0 && width < 30 && height < 30) return;
+
+            const usableThumb = thumbSrc && thumbSrc !== src && !isPlaceholderImageUrl(thumbSrc)
+                ? thumbSrc
+                : null;
+
+            seen.add(src);
             images.push({
-                src: originalSrc,
-                thumbSrc: thumbSrc || (originalSrc !== resolvedCurrentSrc ? resolvedCurrentSrc : null),
-                width: naturalW,
-                height: naturalH
+                src,
+                thumbSrc: usableThumb,
+                width: width > 0 ? Math.round(width) : 0,
+                height: height > 0 ? Math.round(height) : 0
             });
-        }
-    });
+        };
 
-    // 提取 CSS 背景图（规范化为绝对路径）
-    document.querySelectorAll('*').forEach(el => {
-        const style = window.getComputedStyle(el);
-        const bgImage = style.backgroundImage;
-        if (bgImage && bgImage !== 'none') {
-            const urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
-            if (urlMatch && urlMatch[1]) {
-                const absBgUrl = toAbsoluteUrl(urlMatch[1]);
-                if (absBgUrl && !seenSrcs.has(absBgUrl)) {
-                    seenSrcs.add(absBgUrl);
-                    images.push({
-                        src: absBgUrl,
-                        thumbSrc: null,
-                        width: 0,
-                        height: 0
-                    });
+        const LAZY_IMAGE_ATTRS = [
+            'data-original', 'data-original-src', 'data-original-url',
+            'data-full-src', 'data-high-res', 'data-highres',
+            'data-zoom-image', 'data-zoom', 'data-large', 'data-large-src', 'data-full',
+            'data-src', 'data-lazy-src', 'data-lazy', 'data-echo', 'data-url',
+            'data-image', 'data-img', 'data-href', 'data-origin',
+            'data-flickity-lazyload', 'data-pswp-src',
+            'data-actualsrc', 'data-actual-src', 'data-pagespeed-lazy-src'
+        ];
+
+        const collectImg = (img, live) => {
+            const dataset = img.dataset || {};
+            const currentSrc = live
+                ? (img.currentSrc || img.src || '')
+                : (img.getAttribute('src') || '');
+            const resolvedCurrent = toAbsoluteUrl(currentSrc, resolveBase);
+            const usableCurrent = isPlaceholderImageUrl(resolvedCurrent) ? '' : resolvedCurrent;
+
+            let resolvedHighRes = '';
+            for (const attr of LAZY_IMAGE_ATTRS) {
+                const candidate = toAbsoluteUrl(img.getAttribute(attr) || '', resolveBase);
+                if (candidate && !isPlaceholderImageUrl(candidate)) {
+                    resolvedHighRes = candidate;
+                    break;
                 }
             }
-        }
-    });
 
-    // 提取 picture source 响应式图片（规范化为绝对路径）
-    document.querySelectorAll('picture source').forEach(source => {
-        const srcset = source.srcset;
-        if (srcset) {
-            const srcs = srcset.split(',').map(s => s.trim().split(' ')[0]);
-            srcs.forEach(src => {
-                const absSrc = toAbsoluteUrl(src);
-                if (absSrc && !seenSrcs.has(absSrc)) {
-                    seenSrcs.add(absSrc);
-                    images.push({ src: absSrc, thumbSrc: null, width: 0, height: 0 });
+            const srcsetCandidates = [
+                ...parseSrcset(img.getAttribute('srcset') || ''),
+                ...parseSrcset(img.getAttribute('data-srcset') || ''),
+                ...parseSrcset(img.getAttribute('data-lazy-srcset') || '')
+            ]
+                .map(candidate => ({ ...candidate, abs: toAbsoluteUrl(candidate.url, resolveBase) }))
+                .filter(candidate => candidate.abs && !isPlaceholderImageUrl(candidate.abs));
+            srcsetCandidates.sort((a, b) => (b.width - a.width) || (b.density - a.density));
+            const bestSrcset = srcsetCandidates.length > 0 ? srcsetCandidates[0].abs : '';
+
+            const src = resolvedHighRes || bestSrcset || usableCurrent;
+            if (!src) return;
+
+            let width = live ? (img.naturalWidth || 0) : (parseInt(img.getAttribute('width'), 10) || 0);
+            let height = live ? (img.naturalHeight || 0) : (parseInt(img.getAttribute('height'), 10) || 0);
+            if (!width && bestSrcset && src === bestSrcset) {
+                width = srcsetCandidates[0].width || 0;
+            }
+
+            let thumb = usableCurrent && usableCurrent !== src ? usableCurrent : '';
+            if (!thumb) {
+                thumb = toAbsoluteUrl(dataset.thumb || dataset.thumbnail || dataset.preview || dataset.lowRes || '', resolveBase);
+                if (isPlaceholderImageUrl(thumb)) thumb = '';
+            }
+            if (thumb === src) thumb = '';
+
+            pushImage(src, thumb, width, height);
+        };
+
+        const collectRoot = (rootNode, live) => {
+            rootNode.querySelectorAll('img').forEach(img => collectImg(img, live));
+
+            rootNode.querySelectorAll('picture source[srcset], picture source[data-srcset]').forEach(source => {
+                const candidates = [
+                    ...parseSrcset(source.getAttribute('srcset') || ''),
+                    ...parseSrcset(source.getAttribute('data-srcset') || '')
+                ];
+                candidates.forEach(candidate => {
+                    const abs = toAbsoluteUrl(candidate.url, resolveBase);
+                    if (abs && !isPlaceholderImageUrl(abs)) pushImage(abs, null, candidate.width || 0, 0);
+                });
+            });
+        };
+
+        collectRoot(root, isLive);
+
+        if (!isLive) {
+            // 懒加载插件常把真实图片放在 <noscript> 中，静态 HTML 解析时需主动展开
+            root.querySelectorAll('noscript').forEach(noscript => {
+                const markup = (noscript.innerHTML || noscript.textContent || '').trim();
+                if (!markup || !/<(?:img|source|picture)\b/i.test(markup)) return;
+                try {
+                    const noscriptDoc = new DOMParser().parseFromString(markup, 'text/html');
+                    collectRoot(noscriptDoc, false);
+                } catch {
+                    // 忽略无法解析的 noscript 片段
                 }
             });
         }
-    });
 
-    /**
-     * 校验提取的图片资源是否合法有效
-     * @param {HTMLImageElement} img DOM 节点
-     * @param {string} src 图片地址
-     * @returns {boolean}
-     */
-    function isValidImage(img, src) {
-        const width = img.naturalWidth || 0;
-        const height = img.naturalHeight || 0;
-        if (width > 0 && width < 30 && height > 0 && height < 30) return false;
-        if (src.startsWith('data:') && src.length < 1000) return false;
-        if (src.includes('pixel') || src.includes('tracking') || src.includes('spacer')) return false;
-        return true;
+        if (isLive) {
+            root.querySelectorAll('*').forEach(el => {
+                let bgImage = '';
+                try {
+                    bgImage = window.getComputedStyle(el).backgroundImage;
+                } catch {
+                    return;
+                }
+                if (!bgImage || bgImage === 'none') return;
+                const urlRegex = /url\((["']?)(.*?)\1\)/gi;
+                let match;
+                while ((match = urlRegex.exec(bgImage)) !== null) {
+                    const absBgUrl = toAbsoluteUrl(match[2], resolveBase);
+                    if (absBgUrl) pushImage(absBgUrl, null, 0, 0);
+                }
+            });
+        } else {
+            root.querySelectorAll('[style*="background"]').forEach(el => {
+                const styleValue = el.getAttribute('style') || '';
+                const urlRegex = /url\((["']?)(.*?)\1\)/gi;
+                let match;
+                while ((match = urlRegex.exec(styleValue)) !== null) {
+                    const absBgUrl = toAbsoluteUrl(match[2], resolveBase);
+                    if (absBgUrl) pushImage(absBgUrl, null, 0, 0);
+                }
+            });
+        }
+
+        return images;
     }
 
-    return images;
+    /**
+     * 查找下一页：rel=next → 分页容器 → 全页兜底标签匹配
+     */
+    function findNextPageUrl(root, resolveBase, currentPageUrl) {
+        const resolveCandidate = (href) => {
+            const abs = toAbsoluteUrl(href, resolveBase);
+            if (!abs) return '';
+            if (currentPageUrl && stripHash(abs) === stripHash(currentPageUrl)) return '';
+            return abs;
+        };
+
+        const relNext = root.querySelector('link[rel~="next" i][href], a[rel~="next" i][href]');
+        if (relNext) {
+            const abs = resolveCandidate(relNext.getAttribute('href'));
+            if (abs) return abs;
+        }
+
+        const nextLabels = new Set([
+            'next', 'next page', 'nextpage', 'older', 'older posts',
+            '下一页', '下页', '下一頁', '次へ', '次のページ', '次', '다음', '다음 페이지',
+            '›', '»', '→', '>'
+        ]);
+        const prevPattern = /prev|previous|上一页|前一页|上页|前へ|이전/i;
+        const badAncestorPattern = /(next[-_]?(post|article|story|entry)|post[-_]?navigation|article[-_]?(nav|navigation)|adjacent[-_]?post|related[-_]?(post|article))/i;
+        const badLabelPattern = /next\s+(post|article|story|entry)|下一篇|下一篇文章|次の記事/i;
+
+        const isBadContext = (el) => {
+            let node = el;
+            let depth = 0;
+            while (node && node !== root && depth < 6) {
+                const marker = `${typeof node.className === 'string' ? node.className : ''} ${node.id || ''}`;
+                if (badAncestorPattern.test(marker)) return true;
+                node = node.parentElement;
+                depth += 1;
+            }
+            return false;
+        };
+
+        const labelOf = (a) => ({
+            text: (a.textContent || '').replace(/\s+/g, ' ').trim(),
+            aria: (a.getAttribute('aria-label') || '').trim(),
+            title: (a.getAttribute('title') || '').trim()
+        });
+
+        const isNextLabel = (label) => {
+            const text = label.text.toLowerCase();
+            const haystack = `${label.aria} ${label.title} ${label.text}`;
+            if (badLabelPattern.test(haystack)) return false;
+            if (prevPattern.test(text) || prevPattern.test(label.aria)) return false;
+            if (nextLabels.has(text) || nextLabels.has(label.aria.toLowerCase())) return true;
+            if (/^(next|older)\b/i.test(text)) return true;
+            if (/(next page|下一页|下一頁|次のページ|다음\s*페이지)/i.test(haystack)) return true;
+            return false;
+        };
+
+        const containerSelector = [
+            '[class*="pagination" i]', '[class*="pager" i]', '[class*="page-nav" i]',
+            '[class*="pageNav" i]', '[id*="pagination" i]', '[id*="pager" i]',
+            'nav[aria-label*="page" i]', 'nav[aria-label*="页码"]'
+        ].join(',');
+
+        const containers = Array.from(root.querySelectorAll(containerSelector));
+
+        for (const container of containers) {
+            const anchors = Array.from(container.querySelectorAll('a[href]'));
+
+            const active = container.querySelector('[aria-current="page"], .current, .active');
+            if (active) {
+                let sibling = active.nextElementSibling;
+                while (sibling) {
+                    const anchor = sibling.matches('a[href]') ? sibling : sibling.querySelector('a[href]');
+                    if (anchor) {
+                        const abs = resolveCandidate(anchor.getAttribute('href'));
+                        if (abs) return abs;
+                    }
+                    sibling = sibling.nextElementSibling;
+                }
+
+                const activeNumber = parseInt((active.textContent || '').trim(), 10);
+                if (Number.isFinite(activeNumber) && activeNumber > 0) {
+                    for (const anchor of anchors) {
+                        if (parseInt((anchor.textContent || '').trim(), 10) === activeNumber + 1) {
+                            const abs = resolveCandidate(anchor.getAttribute('href'));
+                            if (abs) return abs;
+                        }
+                    }
+                }
+            }
+
+            for (const anchor of anchors) {
+                if (!isNextLabel(labelOf(anchor))) continue;
+                if (isBadContext(anchor)) continue;
+                const abs = resolveCandidate(anchor.getAttribute('href'));
+                if (abs) return abs;
+            }
+        }
+
+        for (const anchor of Array.from(root.querySelectorAll('a[href]'))) {
+            const label = labelOf(anchor);
+            if (!label.text && !label.aria && !label.title) continue;
+            if (label.text.length > 28) continue;
+            if (!isNextLabel(label)) continue;
+            if (isBadContext(anchor)) continue;
+            const abs = resolveCandidate(anchor.getAttribute('href'));
+            if (abs) return abs;
+        }
+
+        return '';
+    }
+
+    const liveMode = !fetchUrl && !providedHtml;
+
+    if (liveMode) {
+        const pageUrl = location.href;
+        const resolveBase = document.baseURI || pageUrl;
+        return {
+            images: harvest(document, resolveBase, true),
+            nextUrl: findNextPageUrl(document, resolveBase, pageUrl),
+            pageUrl,
+            pageTitle: document.title || '',
+            isLive: true
+        };
+    }
+
+    let html = providedHtml || '';
+    let pageUrl = providedUrl || fetchUrl || '';
+
+    if (!html && fetchUrl) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+            const response = await fetch(fetchUrl, {
+                credentials: 'include',
+                redirect: 'follow',
+                signal: controller.signal,
+                headers: { Accept: 'text/html,application/xhtml+xml' }
+            });
+
+            pageUrl = response.url || pageUrl;
+
+            if (!response.ok) {
+                return emptyResult(pageUrl, {
+                    error: `页面请求失败 (HTTP ${response.status})`,
+                    errorType: 'http'
+                });
+            }
+
+            const contentType = (response.headers.get('content-type') || '').toLowerCase();
+            if (contentType && !contentType.includes('html') && !contentType.includes('xml')) {
+                return emptyResult(pageUrl, {
+                    error: '目标地址返回的不是 HTML 页面',
+                    errorType: 'content'
+                });
+            }
+
+            html = await response.text();
+        } catch (error) {
+            const isAbort = error && error.name === 'AbortError';
+            return emptyResult(pageUrl, {
+                error: isAbort ? '页面请求超时' : `页面请求失败: ${error.message}`,
+                errorType: 'network'
+            });
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    if (!html) {
+        return emptyResult(pageUrl, { error: '未获取到页面内容', errorType: 'content' });
+    }
+
+    let doc;
+    try {
+        doc = new DOMParser().parseFromString(html, 'text/html');
+    } catch (error) {
+        return emptyResult(pageUrl, { error: '页面 HTML 解析失败', errorType: 'content' });
+    }
+
+    let resolveBase = pageUrl;
+    const baseEl = doc.querySelector('base[href]');
+    if (baseEl) {
+        try {
+            resolveBase = new URL(baseEl.getAttribute('href'), pageUrl).href;
+        } catch {
+            resolveBase = pageUrl;
+        }
+    }
+
+    return {
+        images: harvest(doc, resolveBase, false),
+        nextUrl: findNextPageUrl(doc, resolveBase, pageUrl),
+        pageUrl,
+        pageTitle: (doc.title || '').trim(),
+        isLive: false
+    };
 }
 
 // ============================================================
@@ -1494,6 +2278,12 @@ function createImageCard(image, index) {
     };
 
     img.onerror = () => {
+        // 缩略图加载失败时先回退到原图，避免直接留下空白卡片
+        if (!img.dataset.fallbackTried && image.src && img.src !== image.src) {
+            img.dataset.fallbackTried = '1';
+            img.src = image.src;
+            return;
+        }
         card.style.display = 'none';
     };
 
@@ -1665,27 +2455,42 @@ function updateDownloadButton() {
 }
 
 /**
- * 刷新顶栏统计提示文本 (联动提取范围与来源标题)
+ * 刷新顶栏统计提示文本 (联动提取范围、翻页进度与选中数量)
  */
 function updateStats() {
     if (!elements.stats) return;
     const total = state.filteredImages.length;
     const selected = state.selectedImages.size;
-    const scopeLabel = state.extractScope === 'current'
-        ? (state.sourceTabTitle ? `当前页 [${truncateString(state.sourceTabTitle, 10)}]` : '当前网页')
+
+    let text;
+    let compact;
+
+    elements.stats.classList.toggle('is-live', state.isCrawling);
+    elements.stats.title = state.extractScope === 'current'
+        ? (state.sourceTabTitle ? `来源网页：${state.sourceTabTitle}` : '当前网页')
         : '全部标签页';
 
-    if (selected > 0) {
-        elements.stats.textContent = `${scopeLabel} · 已选 ${selected}/${total} 张`;
+    if (state.isCrawling) {
+        const pageLabel = state.crawlPage > 0 ? `第 ${state.crawlPage} 页` : '准备翻页';
+        text = `正在翻页 · ${pageLabel} · 已获取 ${total} 张`;
+        compact = state.crawlPage > 0 ? `第 ${state.crawlPage} 页 · ${total} 张` : `扫描中 · ${total} 张`;
+    } else if (state.extractScope === 'all') {
+        text = selected > 0
+            ? `全部标签页 · 已选 ${selected}/${total} 张`
+            : `全部标签页 · 共 ${total} 张图片`;
+        compact = selected > 0 ? `已选 ${selected}/${total}` : `共 ${total} 张`;
     } else {
-        elements.stats.textContent = `${scopeLabel} · 共 ${total} 张图片`;
+        const pageLabel = state.pagesScanned > 1 ? ` · ${state.pagesScanned} 页` : '';
+        text = selected > 0
+            ? `当前网页${pageLabel} · 已选 ${selected}/${total} 张`
+            : `当前网页${pageLabel} · 共 ${total} 张图片`;
+        compact = selected > 0
+            ? `已选 ${selected}/${total}`
+            : (state.pagesScanned > 1 ? `${state.pagesScanned} 页 · ${total} 张` : `共 ${total} 张`);
     }
-}
 
-function toggleClickAction(e) {
-    state.clickAction = e.target.checked ? 'preview' : 'select';
-    if (elements.switchText) elements.switchText.textContent = state.clickAction === 'preview' ? '预览模式' : '选择模式';
-    saveSettings();
+    elements.stats.textContent = text;
+    elements.stats.dataset.compact = compact;
 }
 
 function toggleRename(e) {
@@ -1918,6 +2723,17 @@ function handleTabRemoved(tabId) {
  */
 function removeImagesByTabId(tabId) {
     if (typeof tabId !== 'number') return;
+
+    // 来源标签页被关闭时立即中止正在进行的自动翻页
+    if (tabId === state.sourceTabId) {
+        state.crawlAbort = true;
+        if (state.isCrawling) {
+            state.isCrawling = false;
+            state.crawlPage = 0;
+            state.crawlTotalPages = 0;
+            updateAutoPaginateUI();
+        }
+    }
 
     const removedSrcs = new Set();
 

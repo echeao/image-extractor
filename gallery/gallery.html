@@ -3,376 +3,328 @@
 ============================================================
 Image Extractor - Gallery Page (画廊主页面)
 ============================================================
-
-文件说明：
-这是扩展的主页面，以瀑布流形式展示从所有标签页提取的图片。
-包含：
-1. 悬浮 Head 顶栏与收纳式高级筛选面板 (.sticky-header)
-2. 动态主题系统 (Light / Dark)
-3. 瀑布流展示区 (.masonry)
-4. 全屏大图 Lightbox 预览 (.lightbox)
-
-============================================================
 -->
 <html lang="zh-CN">
 
 <head>
-    <!-- 字符编码：使用 UTF-8 支持中文 -->
     <meta charset="UTF-8">
-
-    <!-- 视口设置：确保在不同分辨率下正确显示 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <!-- 页面标题 -->
     <title>Image Extractor - 图片画廊</title>
-
-    <!-- 引入核心 CSS 样式表 (绝对不能缺失) -->
     <link rel="stylesheet" href="gallery.css">
 </head>
 
 <body>
-    <!-- 
-    ============================================================
-    主容器 (.container)
-    用于限制画面宽度与内外边距
-    ============================================================
-    -->
-    <div class="container">
+    <div class="app-shell">
 
-        <!-- 
-        ============================================================
-        悬浮头部 (sticky-header)
-        使用 position: sticky 固定在顶部
-        包含：
-        1. 极简主控制栏 (.primary-bar) —— 高频操作与核心 CTA
-        2. 折叠式高级筛选/设置面板 (.filter-panel) —— 收纳设置
-        ============================================================
-        -->
+        <!-- ========== 悬浮顶部控制区 ========== -->
         <div class="sticky-header" id="stickyHeader">
 
-            <!-- 
-            ========== 极简主控制栏 (.primary-bar) ==========
-            左侧：Logo、标题与动态统计
-            中间：提权至顶栏的存储文件夹、批量重命名与高频分辨率速选
-            右侧：刷新、全选、核心下载按钮、主题切换、高级设置开合
-            -->
             <header class="primary-bar">
-                <!-- 左侧区域：品牌、提取范围切换与统计 -->
-                <div class="header-left">
-                    <h1 class="title">
-                        <span class="icon">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24"
-                                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                                stroke-linejoin="round">
-                                <rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect>
-                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                                <polyline points="21 15 16 10 5 21"></polyline>
-                            </svg>
-                        </span>
-                        <span class="title-text">Image Extractor</span>
-                    </h1>
-
-                    <!-- 提取范围模式切换胶囊 (分段切换：当前网页 vs 全部标签页) -->
-                    <div class="scope-mode-group" id="scopeModeGroup" role="tablist" aria-label="图片提取范围">
-                        <button class="scope-btn active" data-scope="current" id="scopeCurrentBtn" role="tab" aria-selected="true" title="仅提取打开画廊前所在的当前网页图片">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <circle cx="12" cy="12" r="3"></circle>
-                            </svg>
-                            <span>当前网页</span>
-                        </button>
-                        <button class="scope-btn" data-scope="all" id="scopeAllBtn" role="tab" aria-selected="false" title="提取浏览器中所有已打开网页的图片">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <line x1="2" y1="12" x2="22" y2="12"></line>
-                                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
-                            </svg>
-                            <span>全部标签页</span>
-                        </button>
+                <!-- 品牌 -->
+                <div class="brand-group">
+                    <div class="brand-mark" aria-hidden="true">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="4" ry="4"></rect>
+                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                            <polyline points="21 15 16 10 5 21"></polyline>
+                        </svg>
                     </div>
-
-                    <span class="stats" id="stats">正在扫描...</span>
+                    <div class="brand-text">
+                        <span class="brand-name">Image Extractor</span>
+                        <span class="brand-sub">图片采集画廊</span>
+                    </div>
                 </div>
 
-                <!-- 中间区域：提权的存储与重命名输入 + 一级分辨率速选 -->
-                <div class="header-center">
-                    <!-- 存储与命名快捷组 -->
-                    <div class="storage-rename-group">
-                        <!-- 存储文件夹 -->
-                        <div class="header-field" title="指定下载保存的子文件夹">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                            </svg>
-                            <input type="text" id="downloadFolder" placeholder="存储目录" value="images" aria-label="存储文件夹">
-                        </div>
-                        <div class="field-divider"></div>
-                        <!-- 批量重命名 -->
-                        <div class="header-field" title="开启/关闭批量前缀重命名">
-                            <label class="switch tiny" title="开启重命名">
-                                <input type="checkbox" id="renameToggle" aria-label="开启重命名">
-                                <span class="slider round"></span>
-                            </label>
-                            <input type="text" id="renamePrefix" placeholder="重命名前缀" disabled aria-label="重命名前缀">
-                        </div>
-                    </div>
+                <div class="header-divider"></div>
 
-                    <!-- 分辨率快速选择 -->
-                    <div class="quick-res-bar">
+                <!-- 提取范围 -->
+                <div class="scope-mode-group" id="scopeModeGroup" role="tablist" aria-label="图片提取范围">
+                    <button class="scope-btn active" data-scope="current" id="scopeCurrentBtn" role="tab" aria-selected="true" title="仅提取打开画廊前所在的当前网页图片">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                        <span>当前网页</span>
+                    </button>
+                    <button class="scope-btn" data-scope="all" id="scopeAllBtn" role="tab" aria-selected="false" title="提取浏览器中所有已打开网页的图片">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="2" y1="12" x2="22" y2="12"></line>
+                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                        </svg>
+                        <span>全部标签页</span>
+                    </button>
+                </div>
+
+                <!-- 自动翻页 -->
+                <label class="auto-page-pill" id="autoPaginateControl" title="自动跟随分页链接，抓取整个图集">
+                    <input type="checkbox" id="autoPaginateToggle" class="auto-page-input" aria-label="自动翻页抓取后续分页">
+                    <span class="auto-page-track" aria-hidden="true"><span class="auto-page-thumb"></span></span>
+                    <span class="auto-page-copy">
+                        <span class="auto-page-text">自动翻页</span>
+                    </span>
+                    <span class="auto-page-spinner" aria-hidden="true"></span>
+                </label>
+
+                <span class="stats" id="stats">正在扫描...</span>
+
+                <div class="header-tools">
+                    <!-- 高频分辨率速选 -->
+                    <div class="quick-res-bar" role="group" aria-label="按最小分辨率筛选">
                         <button class="filter-btn" data-min="0">全部</button>
-                        <button class="filter-btn" data-min="500">500px</button>
-                        <button class="filter-btn active" data-min="1000">1000px</button>
+                        <button class="filter-btn" data-min="500">500px+</button>
+                        <button class="filter-btn active" data-min="1000">1000px+</button>
                     </div>
-                </div>
 
-                <!-- 右侧区域：核心交互控件组 -->
-                <div class="header-right">
-                    <!-- 刷新提取按钮 -->
-                    <button class="btn btn-icon" id="refreshBtn" title="重新扫描标签页图片">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
-                        </svg>
-                    </button>
+                    <div class="header-actions">
+                        <div class="icon-group">
+                            <button class="btn btn-icon" id="refreshBtn" title="重新扫描标签页图片" aria-label="重新扫描">
+                                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                                </svg>
+                            </button>
 
-                    <!-- 全选按钮 -->
-                    <button class="btn btn-secondary" id="selectAllBtn" title="全选当前筛选图片">
-                        <span class="checkbox-icon">
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect>
+                            <button class="btn btn-icon" id="themeToggleBtn" title="切换深色/亮色主题" aria-label="切换主题">
+                                <svg class="icon-sun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                                    <circle cx="12" cy="12" r="5"></circle>
+                                    <line x1="12" y1="1" x2="12" y2="3"></line>
+                                    <line x1="12" y1="21" x2="12" y2="23"></line>
+                                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                                    <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                                    <line x1="1" y1="12" x2="3" y2="12"></line>
+                                    <line x1="21" y1="12" x2="23" y2="12"></line>
+                                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                                    <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                                </svg>
+                                <svg class="icon-moon hidden" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                                </svg>
+                            </button>
+
+                            <button class="btn btn-icon btn-toggle-panel" id="togglePanelBtn" title="展开高级筛选与设置" aria-label="展开高级设置">
+                                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="4" y1="21" x2="4" y2="14"></line>
+                                    <line x1="4" y1="10" x2="4" y2="3"></line>
+                                    <line x1="12" y1="21" x2="12" y2="12"></line>
+                                    <line x1="12" y1="8" x2="12" y2="3"></line>
+                                    <line x1="20" y1="21" x2="20" y2="16"></line>
+                                    <line x1="20" y1="12" x2="20" y2="3"></line>
+                                    <line x1="1" y1="14" x2="7" y2="14"></line>
+                                    <line x1="9" y1="8" x2="15" y2="8"></line>
+                                    <line x1="17" y1="16" x2="23" y2="16"></line>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <div class="header-divider compact"></div>
+
+                        <button class="btn btn-secondary" id="selectAllBtn" title="全选当前筛选图片">
+                            <span class="checkbox-icon" aria-hidden="true">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect>
+                                </svg>
+                            </span>
+                            <span class="btn-text">全选</span>
+                        </button>
+
+                        <button class="btn btn-primary" id="downloadBtn" disabled title="下载选中的图片">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
                             </svg>
-                        </span>
-                        <span class="btn-text">全选</span>
-                    </button>
-
-                    <!-- 核心下载按钮 -->
-                    <button class="btn btn-primary" id="downloadBtn" disabled title="下载选中的图片">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
-                        </svg>
-                        <span class="btn-text">下载选中</span>
-                    </button>
-
-                    <div class="divider-vertical"></div>
-
-                    <!-- 主题切换按钮 -->
-                    <button class="btn btn-icon" id="themeToggleBtn" title="切换深色/亮色主题">
-                        <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="5"></circle>
-                            <line x1="12" y1="1" x2="12" y2="3"></line>
-                            <line x1="12" y1="21" x2="12" y2="23"></line>
-                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                            <line x1="1" y1="12" x2="3" y2="12"></line>
-                            <line x1="21" y1="12" x2="23" y2="12"></line>
-                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-                        </svg>
-                        <svg class="icon-moon hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-                        </svg>
-                    </button>
-
-                    <!-- 高级设置与收纳面板 Toggle 按钮 -->
-                    <button class="btn btn-icon btn-toggle-panel" id="togglePanelBtn" title="展开/收起高级筛选与系统设置">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
-                        </svg>
-                    </button>
+                            <span class="btn-text">下载选中</span>
+                        </button>
+                    </div>
                 </div>
             </header>
 
-            <!-- 
-            ========== 折叠式高级筛选/设置面板 (.filter-panel) ==========
-            分模块排布：
-            1. 尺寸与分辨率过滤 (快速预设 + 自定义宽高)
-            2. 图片格式筛选 (PNG / JPG / WebP / SVG / GIF)
-            3. 宽高比例筛选 (横图 / 竖图 / 方形)
-            4. 重命名与导出子目录 (批量前缀 + 文件夹 + 自动关页)
-            5. 视图样式与画布选项 (列数滑块 + 画布背景选择)
-            -->
-            <!-- 
-            ========== 折叠式二级高级筛选/设置面板 (.filter-panel) ==========
-            收纳至 3 组紧凑卡片中：
-            1. 高阶尺寸、格式与比例综合过滤
-            2. 存储路径与批量重命名导出设置
-            3. 瀑布流列数与画布背景模式控制
-            -->
+            <!-- ========== 折叠式高级面板 ========== -->
             <div class="filter-panel collapsed" id="filterPanel">
                 <div class="panel-inner">
-                    <div class="panel-grid">
-                        
-                        <!-- 模块 1：高阶多维图像过滤 -->
-                        <div class="panel-card">
-                            <div class="panel-card-title">
-                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
-                                </svg>
-                                图像高阶过滤
-                            </div>
-                            <div class="panel-card-content vertical">
-                                <!-- 自定义精确宽高范围 -->
-                                <div class="field-row">
-                                    <span class="field-label">尺寸限制</span>
-                                    <div class="custom-filter">
-                                        <div class="input-group">
-                                            <label for="minWidth">宽≥</label>
-                                            <input type="number" id="minWidth" placeholder="0" min="0" value="0">
+                    <div class="panel-content">
+                        <div class="panel-grid">
+
+                            <!-- 图像筛选 -->
+                            <section class="panel-card">
+                                <div class="panel-card-title">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
+                                    </svg>
+                                    图像筛选
+                                </div>
+                                <div class="panel-card-content">
+                                    <div class="field-row">
+                                        <span class="field-label">尺寸限制</span>
+                                        <div class="custom-filter">
+                                            <div class="input-group">
+                                                <label for="minWidth">宽≥</label>
+                                                <input type="number" id="minWidth" placeholder="0" min="0" value="0">
+                                            </div>
+                                            <div class="input-group">
+                                                <label for="minHeight">高≥</label>
+                                                <input type="number" id="minHeight" placeholder="0" min="0" value="0">
+                                            </div>
+                                            <button class="btn btn-apply" id="applyCustomFilter">应用</button>
                                         </div>
-                                        <div class="input-group">
-                                            <label for="minHeight">高≥</label>
-                                            <input type="number" id="minHeight" placeholder="0" min="0" value="0">
+                                    </div>
+                                    <div class="field-row align-start">
+                                        <span class="field-label">文件格式</span>
+                                        <div class="filter-controls" id="formatFilterGroup">
+                                            <button class="chip-btn active" data-format="all">全部</button>
+                                            <button class="chip-btn" data-format="PNG">PNG</button>
+                                            <button class="chip-btn" data-format="JPG">JPG</button>
+                                            <button class="chip-btn" data-format="WEBP">WEBP</button>
+                                            <button class="chip-btn" data-format="SVG">SVG</button>
+                                            <button class="chip-btn" data-format="GIF">GIF</button>
                                         </div>
-                                        <button class="btn btn-apply" id="applyCustomFilter">应用</button>
+                                    </div>
+                                    <div class="field-row align-start">
+                                        <span class="field-label">图像比例</span>
+                                        <div class="filter-controls" id="ratioFilterGroup">
+                                            <button class="chip-btn active" data-ratio="all">全部</button>
+                                            <button class="chip-btn" data-ratio="landscape">横图</button>
+                                            <button class="chip-btn" data-ratio="portrait">竖图</button>
+                                            <button class="chip-btn" data-ratio="square">方形</button>
+                                        </div>
                                     </div>
                                 </div>
-                                <!-- 文件格式 Chip -->
-                                <div class="field-row">
-                                    <span class="field-label">文件格式</span>
-                                    <div class="filter-controls format-controls" id="formatFilterGroup">
-                                        <button class="chip-btn active" data-format="all">全部</button>
-                                        <button class="chip-btn" data-format="PNG">PNG</button>
-                                        <button class="chip-btn" data-format="JPG">JPG</button>
-                                        <button class="chip-btn" data-format="WEBP">WEBP</button>
-                                        <button class="chip-btn" data-format="SVG">SVG</button>
-                                        <button class="chip-btn" data-format="GIF">GIF</button>
+                            </section>
+
+                            <!-- 提取与下载 -->
+                            <section class="panel-card">
+                                <div class="panel-card-title">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                        <polyline points="7 10 12 15 17 10"></polyline>
+                                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                                    </svg>
+                                    提取与下载
+                                </div>
+                                <div class="panel-card-content">
+                                    <div class="field-block">
+                                        <span class="field-label">存储目录</span>
+                                        <div class="input-with-icon">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                            </svg>
+                                            <input type="text" id="downloadFolder" class="text-input" placeholder="images" value="images" aria-label="存储文件夹">
+                                        </div>
+                                    </div>
+
+                                    <div class="field-block">
+                                        <div class="field-block-header">
+                                            <span class="field-label">批量重命名</span>
+                                            <label class="switch" title="开启/关闭批量前缀重命名">
+                                                <input type="checkbox" id="renameToggle" aria-label="开启重命名">
+                                                <span class="slider round"></span>
+                                            </label>
+                                        </div>
+                                        <input type="text" id="renamePrefix" class="text-input" placeholder="前缀，如 photo" disabled aria-label="重命名前缀">
+                                    </div>
+
+                                    <div class="field-row">
+                                        <span class="field-label">下载后关闭标签页</span>
+                                        <label class="switch" title="图片下载完成后自动关闭该图片所在的标签页">
+                                            <input type="checkbox" id="autoCloseTabsToggle" aria-label="下载完成后自动关闭对应标签页">
+                                            <span class="slider round"></span>
+                                        </label>
+                                    </div>
+
+                                    <div class="field-row paginate-limit-row">
+                                        <span class="field-label">自动翻页上限</span>
+                                        <div class="inline-field">
+                                            <input type="number" id="paginateMaxPages" class="number-input" min="2" max="100" step="1" value="20" aria-label="自动翻页最大页数">
+                                            <span class="field-suffix">页</span>
+                                        </div>
+                                    </div>
+
+                                    <p class="field-hint">自动翻页仅在「当前网页」模式生效，会跟随下一页链接或 /2/ 形式的分页地址。</p>
+                                </div>
+                            </section>
+
+                            <!-- 视图与布局 -->
+                            <section class="panel-card">
+                                <div class="panel-card-title">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="3" y="3" width="7" height="7"></rect>
+                                        <rect x="14" y="3" width="7" height="7"></rect>
+                                        <rect x="14" y="14" width="7" height="7"></rect>
+                                        <rect x="3" y="14" width="7" height="7"></rect>
+                                    </svg>
+                                    视图与布局
+                                </div>
+                                <div class="panel-card-content">
+                                    <div class="field-row">
+                                        <span class="field-label">画廊列数</span>
+                                        <div class="zoom-control">
+                                            <button class="btn btn-icon small" id="decreaseColumns" title="放大 (减少列数)">-</button>
+                                            <input type="range" id="columnSlider" min="1" max="8" value="5" step="1" aria-label="调整列数">
+                                            <button class="btn btn-icon small" id="increaseColumns" title="缩小 (增加列数)">+</button>
+                                            <span class="column-value" id="columnValue">5</span>
+                                        </div>
+                                    </div>
+                                    <div class="field-row">
+                                        <span class="field-label">画布背景</span>
+                                        <div class="canvas-bg-selector" id="canvasBgSelector">
+                                            <button class="bg-option active" data-bg="default" title="默认浅/深底色"></button>
+                                            <button class="bg-option bg-dark" data-bg="dark" title="纯黑背景"></button>
+                                            <button class="bg-option bg-gray" data-bg="gray" title="深灰背景"></button>
+                                            <button class="bg-option bg-light" data-bg="light" title="纯白背景"></button>
+                                            <button class="bg-option bg-checker" data-bg="checkerboard" title="棋盘格透明底图"></button>
+                                        </div>
                                     </div>
                                 </div>
-                                <!-- 图像比例 Chip -->
-                                <div class="field-row">
-                                    <span class="field-label">图像比例</span>
-                                    <div class="filter-controls ratio-controls" id="ratioFilterGroup">
-                                        <button class="chip-btn active" data-ratio="all">全部</button>
-                                        <button class="chip-btn" data-ratio="landscape">横图</button>
-                                        <button class="chip-btn" data-ratio="portrait">竖图</button>
-                                        <button class="chip-btn" data-ratio="square">方形</button>
-                                    </div>
-                                </div>
-                            </div>
+                            </section>
                         </div>
 
-                        <!-- 模块 2：高级选项与导出操作 -->
-                        <div class="panel-card">
-                            <div class="panel-card-title">
-                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                                </svg>
-                                快捷选择与高级操作
-                            </div>
-                            <div class="panel-card-content vertical">
-                                <!-- 反选按钮 (从顶栏移入二级收纳区) -->
-                                <div class="field-row">
-                                    <span class="field-label">反向选择</span>
-                                    <button class="btn btn-secondary small" id="invertSelectBtn" title="反向选择当前图片">
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                            <polyline points="17 1 21 5 17 9"></polyline>
-                                            <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-                                            <polyline points="7 23 3 19 7 15"></polyline>
-                                            <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-                                        </svg>
-                                        <span>反选全部图片</span>
-                                    </button>
-                                </div>
-                                <!-- 下载后自动关闭标签页开关 -->
-                                <div class="field-row">
-                                    <span class="field-label">下载后自动关页</span>
-                                    <label class="switch" title="图片下载完成后自动关闭该图片所在的标签页">
-                                        <input type="checkbox" id="autoCloseTabsToggle" aria-label="下载完成后自动关闭对应标签页">
-                                        <span class="slider round"></span>
-                                    </label>
-                                </div>
+                        <div class="panel-footer">
+                            <span class="filter-stats" id="filterStats">正在统计筛选数据...</span>
+                            <div class="panel-footer-actions">
+                                <button class="btn btn-ghost small" id="invertSelectBtn" title="反向选择当前图片">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="17 1 21 5 17 9"></polyline>
+                                        <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                                        <polyline points="7 23 3 19 7 15"></polyline>
+                                        <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                                    </svg>
+                                    <span>反选</span>
+                                </button>
+                                <button class="btn btn-ghost small" id="resetFilterBtn" title="恢复默认筛选条件">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path>
+                                    </svg>
+                                    <span>重置筛选</span>
+                                </button>
                             </div>
                         </div>
-
-                        <!-- 模块 3：视图与画布控制 -->
-                        <div class="panel-card">
-                            <div class="panel-card-title">
-                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <rect x="3" y="3" width="7" height="7"></rect>
-                                    <rect x="14" y="3" width="7" height="7"></rect>
-                                    <rect x="14" y="14" width="7" height="7"></rect>
-                                    <rect x="3" y="14" width="7" height="7"></rect>
-                                </svg>
-                                视图与背景控制
-                            </div>
-                            <div class="panel-card-content vertical">
-                                <!-- 瀑布流列数调控滑块 -->
-                                <div class="field-row">
-                                    <span class="field-label">画廊列数</span>
-                                    <div class="zoom-control">
-                                        <button class="btn btn-icon small" id="decreaseColumns" title="放大 (减少列数)">-</button>
-                                        <input type="range" id="columnSlider" min="1" max="8" value="5" step="1" aria-label="调整列数">
-                                        <button class="btn btn-icon small" id="increaseColumns" title="缩小 (增加列数)">+</button>
-                                        <span class="column-value" id="columnValue">5</span>
-                                    </div>
-                                </div>
-                                <!-- 画布背景颜色/透明网格切换 -->
-                                <div class="field-row">
-                                    <span class="field-label">画布背景</span>
-                                    <div class="canvas-bg-selector" id="canvasBgSelector">
-                                        <button class="bg-option active" data-bg="default" title="默认浅/深底色"></button>
-                                        <button class="bg-option bg-dark" data-bg="dark" title="纯黑背景"></button>
-                                        <button class="bg-option bg-gray" data-bg="gray" title="深灰背景"></button>
-                                        <button class="bg-option bg-light" data-bg="light" title="纯白背景"></button>
-                                        <button class="bg-option bg-checker" data-bg="checkerboard" title="棋盘格透明底图"></button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                    </div>
-
-                    <!-- 面板底部状态与结果汇总与重置按钮 -->
-                    <div class="panel-footer">
-                        <span class="filter-stats" id="filterStats">正在统计筛选数据...</span>
-                        <button class="btn btn-text-action" id="resetFilterBtn" title="恢复默认筛选条件">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path>
-                            </svg>
-                            <span>重置所有筛选</span>
-                        </button>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- 
-        ============================================================
-        加载状态 (.loader)
-        ============================================================
-        -->
-        <div class="loader" id="loader">
-            <div class="spinner"></div>
-            <p>正在从标签页提取图片...</p>
-        </div>
-
-        <!-- 
-        ============================================================
-        空状态 (.empty-state)
-        ============================================================
-        -->
-        <div class="empty-state hidden" id="emptyState">
-            <div class="empty-icon">
-                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M22 12h-6l-2 3h-4l-2-3H2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-7z"></path>
-                    <path d="M5.45 5.11L2 12v0h20v0l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
-                </svg>
+        <!-- ========== 主内容 ========== -->
+        <main class="gallery-main">
+            <div class="loader" id="loader">
+                <div class="spinner"></div>
+                <p>正在从标签页提取图片...</p>
             </div>
-            <p>未找到任何图片</p>
-            <span class="empty-hint">请打开包含图片的网页后点击刷新</span>
-        </div>
 
-        <!-- 
-        ============================================================
-        瀑布流容器 (.masonry)
-        ============================================================
-        -->
-        <div class="masonry hidden" id="masonry"></div>
+            <div class="empty-state hidden" id="emptyState">
+                <div class="empty-icon" aria-hidden="true">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="4" ry="4"></rect>
+                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                        <polyline points="21 15 16 10 5 21"></polyline>
+                    </svg>
+                </div>
+                <p>未找到任何图片</p>
+                <span class="empty-hint">请打开包含图片的网页，或调整筛选条件后刷新</span>
+            </div>
+
+            <div class="masonry hidden" id="masonry"></div>
+        </main>
     </div>
 
-    <!-- 
-    ============================================================
-    右下角 Floating 悬浮诊断 Toast / 抽屉 (.download-diagnostics)
-    ============================================================
-    -->
+    <!-- ========== 右下角诊断 Toast ========== -->
     <div class="download-diagnostics hidden" id="downloadDiagnostics" aria-live="polite">
         <div class="diagnostics-header">
             <div class="diagnostics-title-group">
@@ -387,7 +339,7 @@ Image Extractor - Gallery Page (画廊主页面)
                         <line x1="16" y1="13" x2="8" y2="13"></line>
                         <line x1="16" y1="17" x2="8" y2="17"></line>
                     </svg>
-                    <span>诊断日志</span>
+                    <span>日志</span>
                 </button>
                 <button class="btn-close-diagnostics" id="closeDiagnosticsBtn" title="关闭诊断框">&times;</button>
             </div>
@@ -395,21 +347,14 @@ Image Extractor - Gallery Page (画廊主页面)
         <pre id="downloadDiagnosticsLog" class="hidden"></pre>
     </div>
 
-
-
-    <!-- 
-    ============================================================
-    Lightbox 大图预览 (.lightbox)
-    ============================================================
-    -->
+    <!-- ========== Lightbox 大图预览 ========== -->
     <div class="lightbox hidden" id="lightbox">
-        <button class="lightbox-close" id="lightboxClose">&times;</button>
+        <button class="lightbox-close" id="lightboxClose" aria-label="关闭预览">&times;</button>
         <div class="lightbox-content">
             <img src="" alt="Preview" id="lightboxImg">
         </div>
     </div>
 
-    <!-- 页面交互脚本 -->
     <script src="../scripts/clipboard-smart-paste.js"></script>
     <script src="gallery.js"></script>
 </body>

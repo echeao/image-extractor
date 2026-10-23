@@ -365,6 +365,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             .catch(error => sendResponse({ success: false, error: error.message }));
         return true;
     }
+
+    // 自动翻页跨域兜底：由后台使用宿主权限抓取后续分页 HTML
+    if (request.action === 'fetchPageHtml') {
+        if (!sender || sender.id !== chrome.runtime.id) {
+            sendResponse({ success: false, error: '未授权的请求来源' });
+            return false;
+        }
+
+        fetchPageHtmlViaBackground(request.url)
+            .then(result => sendResponse(result))
+            .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
 });
 
 // ============================================================
@@ -627,6 +640,68 @@ function waitForDownloadCompletion(downloadId, timeoutMs = 15000) {
             }
         });
     });
+}
+
+/**
+ * 抓取分页 HTML（自动翻页跨域兜底通道）
+ *
+ * 同源分页由来源标签页自行 fetch，以复用页面登录态与同站 Cookie；
+ * 仅当下一分页跨域或页面上下文请求被拦截时，才由后台使用宿主权限代为抓取。
+ *
+ * @param {string} url - 目标分页地址
+ * @returns {Promise<{ success: boolean, html?: string, finalUrl?: string, status?: number, error?: string }>}
+ */
+async function fetchPageHtmlViaBackground(url) {
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return { success: false, error: '无效的翻页地址' };
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { success: false, error: '仅支持 HTTP/HTTPS 翻页地址' };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+
+    try {
+        const response = await fetch(parsed.href, {
+            credentials: 'include',
+            redirect: 'follow',
+            signal: controller.signal,
+            headers: {
+                'Accept': 'text/html,application/xhtml+xml'
+            }
+        });
+
+        if (!response.ok) {
+            return { success: false, status: response.status, error: `HTTP ${response.status}` };
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType && !/html|xml/i.test(contentType)) {
+            return { success: false, status: response.status, error: '目标地址不是 HTML 页面' };
+        }
+
+        const html = await response.text();
+        if (html.length > 4_000_000) {
+            return { success: false, status: response.status, error: '页面内容过大，已跳过' };
+        }
+
+        return {
+            success: true,
+            html,
+            finalUrl: response.url || parsed.href,
+            status: response.status
+        };
+    } catch (error) {
+        const message = error?.name === 'AbortError' ? '页面请求超时' : error.message;
+        return { success: false, error: message };
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 // ============================================================
