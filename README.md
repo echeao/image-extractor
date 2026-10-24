@@ -8,7 +8,7 @@
 [![Chrome Extension](https://img.shields.io/badge/Chrome-Extension-4285F4?style=for-the-badge&logo=google-chrome&logoColor=white)](https://chrome.google.com/webstore)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
-从多个标签页提取图片，统一进入画廊进行筛选、预览和批量下载。
+从多个标签页提取图片，统一进入画廊进行筛选、预览和批量下载，支持分页图集自动连续抓取。
 
 </div>
 
@@ -16,7 +16,10 @@
 
 - 多标签页图片扫描：自动提取 `img`、CSS `background-image`、`srcset`、懒加载资源
 - 自动翻页抓取：当前网页模式可跟随“下一页”或 `/2/` 形式的分页链接，连续抓取整个图集
+- 双通道分页抓取：优先复用原标签页登录态请求分页，跨域失败时自动改由后台抓取 HTML 兜底解析
+- 懒加载深度识别：自动跳过 `placeholder` / `1x1` / SVG 占位图，从 `data-*`、`srcset`、`<picture>`、`<noscript>` 中提取真实原图
 - 瀑布流画廊：支持 1~8 列布局、图片来源标签、分辨率与画质标识
+- 画布背景切换：默认、纯黑、深灰、纯白与透明棋盘格 5 种背景，方便查看透明图
 - 智能筛选：按分辨率、最小宽高、格式、比例快速过滤
 - 批量下载：全选、反选、单图下载与批量下载一键完成
 - 自动关页：下载完成后可自动关闭来源标签页，减少手动清理
@@ -39,13 +42,18 @@ cd image-extractor
 
 ## 🧭 使用方式
 
-1. 打开多个包含图片的网页
+1. 打开包含图片的网页（或需要批量提取的多个网页）
 2. 点击浏览器工具栏中的扩展图标
-3. 等待图片扫描完成
-4. 在画廊页中筛选图片
-5. 点击图片选择/取消选择
-6. 点击 “下载选中” 保存到本地
-7. 如开启自动关页，下载完成后会自动关闭相关标签页
+3. 在顶栏选择提取模式：`当前网页` 或 `全部标签页`
+4. 抓取分页图集时，在 `当前网页` 模式下打开顶栏的「自动翻页」开关
+   - 页数上限在高级面板的「提取与下载」卡片中设置，范围 2~100，默认 20
+   - 顶栏会实时显示“正在翻页 · 第 N 页 · 已获取 X 张”，结束后在右下角提示停止原因
+5. 等待图片扫描完成，在画廊页中按分辨率、格式、比例筛选
+6. 点击图片选择/取消选择，可用全选、反选
+7. 点击 “下载选中” 保存到本地
+8. 如开启自动关页，下载完成后会自动关闭相关标签页
+
+> 自动翻页仅在 `当前网页` 模式生效；切到 `全部标签页` 时开关与页数上限会自动隐藏。打开开关会立即重新扫描当前网页并从头开始翻页。
 
 ## 🏗️ 项目结构
 
@@ -53,7 +61,10 @@ cd image-extractor
 image-extractor/
 ├── manifest.json
 ├── README.md
+├── AGENTS.md                # 工程约束与改动后检查清单
 ├── MANIFEST_DOCS.js
+├── docs/
+│   └── HANDOVER.md          # 交接文档：行为规格、验证方法、已知限制
 ├── icons/
 │   ├── icon16.png
 │   ├── icon32.png
@@ -77,9 +88,15 @@ image-extractor/
 ## 🔧 关键实现
 
 - `gallery/gallery.js`：图片提取、筛选、瀑布流、预览和批量下载逻辑
+  - `extractImages()` 负责提取主流程，`crawlPaginatedPages()` 是自动翻页主循环（串行请求、360ms 间隔、访问去重与多重停止条件）
+  - `scrapeImagesFromPage()` 会被序列化注入目标页面执行，必须保持完全自包含，不能引用画廊作用域的变量或函数
+  - `isPlaceholderImageUrl()` 过滤懒加载占位图，`LAZY_IMAGE_ATTRS` 与 `srcset`/`<picture>`/`<noscript>` 一起决定最终原图地址
 - `popup/popup.js`：快速筛选、快捷下载和设置同步
-- `scripts/background.js`：下载处理、状态追踪和自动关页实现
+- `scripts/background.js`：下载处理、状态追踪、自动关页，以及 `fetchPageHtml` 跨域分页兜底（仅 http/https、15s 超时、4MB 上限）
 - `scripts/clipboard-smart-paste.js`：剪贴板识别和命名辅助
+- `docs/HANDOVER.md`：面向后续接手的完整交接说明
+
+设置项统一持久化在 `chrome.storage.local` 的同一个 key 下（提取模式、筛选条件、列数、主题、画布背景、自动关页、命名前缀、自动翻页开关与上限等）。
 
 ## 🛡️ 权限说明
 
@@ -102,6 +119,14 @@ image-extractor/
 - 找到扩展并查看 “Service Worker” 日志
 - 重点检查 `background.js` 中的下载追踪与自动关页逻辑
 - 画廊页和弹出页可通过开发者工具查看 `console` 输出
+- 改动后先跑语法与差异检查：
+
+```bash
+node --check gallery/gallery.js && node --check scripts/background.js
+git diff --check
+```
+
+- 修改提取/翻页逻辑时，建议在本地起临时静态站点做 mock 验证，方法见 `docs/HANDOVER.md` 第六节
 
 ## 📄 许可证
 
